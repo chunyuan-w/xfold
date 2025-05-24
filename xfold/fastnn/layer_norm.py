@@ -1,3 +1,5 @@
+# Copyright 2025 Xflops
+
 import numbers
 from typing import List, Union
 
@@ -10,6 +12,8 @@ import triton
 import triton.language as tl
 
 from xfold.fastnn import config as fastnn_config
+
+from af3_kernels.tools import profile
 
 _shape_t = Union[int, List[int], Size]
 
@@ -138,6 +142,7 @@ class LayerNorm(nn.Module):
             if self.bias is not None:
                 torch.nn.init.zeros_(self.bias)
 
+    @profile("LayerNorm")
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if fastnn_config.layer_norm_implementation == "torch":
             return F.layer_norm(

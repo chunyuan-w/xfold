@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -20,6 +21,9 @@ from xfold.constants import residue_names
 from xfold.nn import pairformer
 
 from xfold import fastnn
+from af3_kernels.tools import profile
+
+from tqdm import trange
 
 @dataclass
 class DistogramFeaturesConfig:
@@ -32,6 +36,7 @@ class DistogramFeaturesConfig:
     num_bins: int = 39
 
 
+@profile()
 def dgram_from_positions(positions, config: DistogramFeaturesConfig):
     """Compute distogram from amino acid positions.
 
@@ -58,12 +63,13 @@ def dgram_from_positions(positions, config: DistogramFeaturesConfig):
         keepdims=True,
     )
 
-    dgram = (dist2 > lower_breaks).to(dtype=torch.float32) * (
+    dgram = (dist2 > lower_breaks).to(dtype=torch.bfloat16) * (
         dist2 < upper_breaks
-    ).to(dtype=torch.float32)
+    ).to(dtype=torch.bfloat16)
     return dgram
 
 
+@profile()
 def make_backbone_rigid(
     positions: geometry.Vec3Array,
     mask: torch.Tensor,
@@ -129,6 +135,7 @@ class TemplateEmbedding(nn.Module):
         self.output_linear = nn.Linear(
             self.num_channels, self.pair_channel, bias=False)
 
+    @profile("TemplateEmbedding")
     def forward(
         self,
         query_embedding: torch.Tensor,
@@ -142,7 +149,7 @@ class TemplateEmbedding(nn.Module):
         summed_template_embeddings = query_embedding.new_zeros(
             num_res, num_res, self.num_channels)
 
-        for template_idx in range(num_templates):
+        for template_idx in trange(num_templates, desc="Temp Embed"):
             template_embedding = self.single_template_embedding(
                 query_embedding, templates[template_idx], padding_mask_2d, multichain_mask_2d
             )
@@ -196,6 +203,7 @@ class SingleTemplateEmbedding(nn.Module):
 
         self.output_layer_norm = fastnn.LayerNorm(self.num_channels)
 
+    @profile()
     def construct_input(
         self, query_embedding, templates: features.Templates, multichain_mask_2d
     ) -> torch.Tensor:
@@ -291,6 +299,7 @@ class SingleTemplateEmbedding(nn.Module):
 
         return act
 
+    @profile("SingleTemplateEmbedding")
     def forward(
         self,
         query_embedding: torch.Tensor,

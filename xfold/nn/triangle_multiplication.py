@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -14,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from xfold import fastnn
+from af3_kernels.tools import profile
 
 
 class TriangleMultiplication(nn.Module):
@@ -33,6 +35,7 @@ class TriangleMultiplication(nn.Module):
         if _outgoing is True:
             self.equation='cik,cjk->cij'
 
+    @profile("TriangleMultiplication")
     def forward(self, pair: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         Args:

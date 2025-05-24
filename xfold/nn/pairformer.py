@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -21,6 +22,7 @@ from xfold.nn.attention import GridSelfAttention, MSAAttention
 from xfold.nn.diffusion_transformer import SelfAttention
 
 from xfold import fastnn
+from af3_kernels.tools import profile
 
 
 class PairformerBlock(nn.Module):
@@ -74,6 +76,7 @@ class PairformerBlock(nn.Module):
                 c_x=c_single, num_head=n_heads, use_single_cond=False)
             self.single_transition = Transition(c_x=self.c_single)
 
+    @profile("PairformerBlock")
     def forward(
         self,
         pair: torch.Tensor,
@@ -135,6 +138,7 @@ class EvoformerBlock(nn.Module):
         )
         self.pair_transition = Transition(c_x=c_pair)
 
+    @profile("EvoformerBlock")
     def forward(
         self,
         msa: torch.Tensor,

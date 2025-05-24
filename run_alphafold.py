@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -29,6 +30,7 @@ import os
 import pathlib
 import shutil
 import string
+import sys
 import textwrap
 import time
 from typing import overload
@@ -49,11 +51,65 @@ from alphafold3.model.diffusion.model import Diffuser
 import numpy as np
 import torch
 import torch.utils._pytree as pytree
+import torch.distributed as dist
+import intel_extension_for_pytorch  # For Intel Ops
+import oneccl_bindings_for_pytorch  # For oneCCL backend
+
+from af3_kernels import reset_debug_timers, print_debug_timers
+from af3_kernels.tools import DO_PROFILE, USE_DIST
 
 from xfold.alphafold3 import AlphaFold3
 from xfold.params import import_jax_weights_
 from xfold.fastnn import config as fastnn_config
 
+_BUCKETS: tuple[int, ...] = (
+    64,
+    128,
+    192,
+    256,
+    320,
+    384,
+    448,
+    512,
+    640,
+    768,
+    896,
+    1024,
+    1152,
+    1280,
+    1408,
+    1536,
+    2048,
+    2560,
+    3072,
+    3584,
+    4096,
+    4608,
+    5120,
+)
+
+os.environ["RANK"] = str(os.environ.get("PMI_RANK", 0))
+os.environ["LOCAL_RANK"] = str(os.environ.get("MPI_LOCALRANKID", 0))
+os.environ["WORLD_SIZE"] = str(os.environ.get("PMI_SIZE", 1))
+
+PROFILE_FILENAME = os.environ.get("PROFILE_FILENAME", "trace")
+
+if USE_DIST:
+    backend = os.environ.get("USE_BACKEND", "ccl")
+    print(f"Using backend: {backend}")
+    dist.init_process_group(
+        backend,
+        init_method="env://",
+    )
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    if rank != 0:
+        fnull = open(os.devnull, "w")
+        os.dup2(fnull.fileno(), sys.stdout.fileno())
+        os.dup2(fnull.fileno(), sys.stderr.fileno())
+else:
+    rank = 0
+    world_size = 1
 
 _HOME_DIR = pathlib.Path(os.environ.get('HOME'))
 DEFAULT_MODEL_DIR = _HOME_DIR / 'models/model_103275239_1'
@@ -242,9 +298,27 @@ class ModelRunner:
         featurised_example['deletion_mean'] = featurised_example['deletion_mean'].to(
             dtype=torch.float32)
 
-        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+        featurised_example = {
+            k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v for k, v in featurised_example.items()
+        }
+        self._model.to(dtype=torch.bfloat16)
+
+        reset_debug_timers()
+        if DO_PROFILE:
+            from torch.profiler import profile, ProfilerActivity
+
+            with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+                result = self._model(featurised_example)
+            prof.export_chrome_trace(f"{PROFILE_FILENAME}-{rank}.json")
+            print("profiling done")
+        else:
             result = self._model(featurised_example)
-            result['__identifier__'] = self._model.__identifier__.numpy()
+        print_debug_timers()
+
+        if rank != 0:
+            return None
+
+        result['__identifier__'] = self._model.__identifier__.numpy()
 
         result = pytree.tree_map_only(
             torch.Tensor,
@@ -309,7 +383,8 @@ def predict_structure(
     all_inference_results = []
     for seed, example in zip(fold_input.rng_seeds, featurised_examples):
         print(f'Running model inference for seed {seed}...')
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         inference_start_time = time.time()
 
         # set the random seed for the model.
@@ -318,11 +393,17 @@ def predict_structure(
         np.random.seed(seed)
 
         result = model_runner.run_inference(example)
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         print(
             f'Running model inference for seed {seed} took '
             f' {time.time() - inference_start_time:.2f} seconds.'
         )
+
+        if rank != 0:
+            print(f"Skipping extracting output structures for rank = {rank}")
+            return None
+
         print(
             f'Extracting output structures (one per sample) for seed {seed}...')
         extract_structures = time.time()
@@ -488,6 +569,11 @@ def process_fold_input(
             model_runner=model_runner,
             buckets=buckets,
         )
+
+        if rank != 0:
+            print(f"Skipping writing outputs for rank = {rank}")
+            return None
+
         print(
             f'Writing outputs for {fold_input.name} for seed(s)'
             f' {fold_input.rng_seeds}...'
@@ -581,7 +667,7 @@ def main(_):
         data_pipeline_config = None
 
     if _RUN_INFERENCE.value:
-        device = torch.device('cuda')
+        device = torch.device("cpu")
         print(f'Found local device: {device}')
 
         print('Building model from scratch...')
@@ -601,8 +687,11 @@ def main(_):
             model_runner=model_runner,
             output_dir=os.path.join(
                 _OUTPUT_DIR.value, fold_input.sanitised_name()),
+            buckets=_BUCKETS,
         )
-
+    if USE_DIST:
+        torch.distributed.barrier()
+        dist.destroy_process_group()
     print(f'Done processing {len(fold_inputs)} fold inputs.')
 
 

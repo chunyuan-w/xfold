@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 DeepMind Technologies Limited
 #
 # AlphaFold 3 source code is licensed under CC BY-NC-SA 4.0. To view a copy of
@@ -14,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from xfold import fastnn
+from af3_kernels.tools import profile
 
 
 class GridSelfAttention(nn.Module):
@@ -36,6 +38,7 @@ class GridSelfAttention(nn.Module):
         self.output_projection = nn.Linear(
             self.c_pair, self.c_pair, bias=False)
 
+    @profile()
     def _attention(self, pair: torch.Tensor, mask: torch.Tensor, bias: torch.Tensor):
         q = self.q_projection(pair)
         k = self.k_projection(pair)
@@ -55,6 +58,7 @@ class GridSelfAttention(nn.Module):
         weighted_avg *= torch.sigmoid(gate_values)
         return self.output_projection(weighted_avg)
 
+    @profile("GridSelfAttention")
     def forward(self, pair, mask):
         """
         Args:
@@ -96,6 +100,7 @@ class MSAAttention(nn.Module):
         self.gating_query = nn.Linear(self.c_msa, self.c_msa, bias=False)
         self.output_projection = nn.Linear(self.c_msa, self.c_msa, bias=False)
 
+    @profile("MSAAttention")
     def forward(self, msa, msa_mask, pair):
         msa = self.act_norm(msa)
         pair = self.pair_norm(pair)

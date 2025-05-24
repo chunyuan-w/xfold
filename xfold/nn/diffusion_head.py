@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -19,6 +20,7 @@ from xfold.nn.diffusion_transformer import DiffusionTransformer, DiffusionTransi
 from xfold.nn.atom_cross_attention import AtomCrossAttEncoder, AtomCrossAttDecoder
 
 from xfold import fastnn
+from af3_kernels.tools import profile
 
 # Carefully measured by averaging multimer training set.
 SIGMA_DATA = 16.0
@@ -141,6 +143,7 @@ class DiffusionHead(nn.Module):
 
         self.fourier_embeddings = FourierEmbeddings(dim=256)
 
+    @profile()
     def _conditioning(
         self,
         batch,
@@ -182,6 +185,7 @@ class DiffusionHead(nn.Module):
 
         return single_cond, pair_cond
 
+    @profile("DiffusionHead")
     def forward(
         self,
         positions_noisy: torch.Tensor,

@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 DeepMind Technologies Limited
 #
 # AlphaFold 3 source code is licensed under CC BY-NC-SA 4.0. To view a copy of
@@ -33,7 +34,7 @@ def mask_mean(mask, value, dim=None, keepdim=False, eps=1e-10):
         dim, abc.Iterable
     ), 'axis needs to be either an iterable, integer or "None"'
 
-    broadcast_factor = 1.0
+    broadcast_factor = torch.Tensor([1.0]).to(value.dtype)
     for dim_ in dim:
         value_size = value_shape[dim_]
         mask_size = mask_shape[dim_]

@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -22,6 +23,7 @@ from xfold.nn import atom_layout, utils
 from xfold.nn.diffusion_transformer import DiffusionCrossAttTransformer
 
 from xfold import fastnn
+from af3_kernels.tools import profile
 
 
 @dataclasses.dataclass(frozen=True)
@@ -130,6 +132,7 @@ class AtomCrossAttEncoder(nn.Module):
             self.embed_trunk_pair_cond = nn.Linear(
                 self.c_trunk_pair_cond, self.per_atom_pair_channels, bias=False)
 
+    @profile()
     def _per_atom_conditioning(self, batch: feat_batch.Batch) -> tuple[torch.Tensor, torch.Tensor]:
 
         # Compute per-atom single conditioning
@@ -178,6 +181,7 @@ class AtomCrossAttEncoder(nn.Module):
 
         return act, pair_act
 
+    @profile("AtomCrossAttEncoder")
     def forward(
         self,
         batch: feat_batch.Batch,
@@ -378,6 +382,7 @@ class AtomCrossAttDecoder(nn.Module):
         self.atom_features_to_position_update = nn.Linear(
             self.per_atom_channels, 3, bias=False)
 
+    @profile("AtomCrossAttDecoder")
     def forward(self,
                 batch: feat_batch.Batch,
                 token_act: torch.Tensor,  # (num_tokens, ch)

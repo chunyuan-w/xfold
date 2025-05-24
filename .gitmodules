@@ -1,0 +1,3 @@
+[submodule "af3_kernels"]
+	path = af3_kernels
+	url = https://github.com/HPC-SJTU/af3_kernels.git

@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -19,6 +20,7 @@ import einops
 
 from xfold.nn import atom_layout
 from xfold import fastnn
+from af3_kernels.tools import profile
 
 
 class AdaptiveLayerNorm(nn.Module):
@@ -45,6 +47,7 @@ class AdaptiveLayerNorm(nn.Module):
         else:
             self.layer_norm = fastnn.LayerNorm(self.c_x)
 
+    @profile("AdaptiveLayerNorm")
     def forward(self,
                 x: torch.Tensor,
                 single_cond: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -79,6 +82,7 @@ class AdaLNZero(nn.Module):
             self.adaptive_zero_cond = nn.Linear(
                 self.c_single_cond, self.c_out, bias=True)
 
+    @profile("AdaLNZero")
     def forward(self,
                 x: torch.Tensor,
                 single_cond: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -117,6 +121,7 @@ class DiffusionTransition(nn.Module):
             self.use_single_cond
         )
 
+    @profile("DiffusionTransition")
     def forward(self, x: torch.Tensor, single_cond: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.adaptive_layernorm(x, single_cond)
         c = fastnn.gated_linear_unit(x, self.transition1.weight.T)
@@ -151,6 +156,7 @@ class SelfAttention(nn.Module):
         self.adaptive_zero_init = AdaLNZero(
             self.c_x, self.c_x, self.c_single_cond, self.use_single_cond)
 
+    @profile("SelfAttention")
     def forward(self,
                 x: torch.Tensor,
                 mask: torch.Tensor,
@@ -216,6 +222,7 @@ class DiffusionTransformer(nn.Module):
         self.transition_block = nn.ModuleList(
             [DiffusionTransition(self.c_act, self.c_single_cond, use_single_cond=True) for _ in range(self.num_blocks)])
 
+    @profile("DiffusionTransformer")
     def forward(self,
                 act: torch.Tensor,
                 mask: torch.Tensor,
@@ -249,7 +256,7 @@ class CrossAttention(nn.Module):
         self.key_dim_per_head = self.key_dim // self.num_head
         self.value_dim_per_head = self.value_dim // self.num_head
 
-        self.q_scale = self.key_dim_per_head ** (-0.5)
+        self.q_scale = torch.Tensor([self.key_dim_per_head ** (-0.5)]).to(torch.bfloat16)
 
         self.q_adaptive_layernorm = AdaptiveLayerNorm(
             c_x=self.key_dim, c_single_cond=self.c_single_cond, use_single_cond=True)
@@ -281,7 +288,7 @@ class CrossAttention(nn.Module):
             1, f'{mask_k.shape}, {x_k.shape}'
 
         bias = (
-            1e9
+            torch.Tensor([1e9]).to(torch.bfloat16)
             * mask_q.logical_not()[..., None, :, None]
             * mask_k.logical_not()[..., None, None, :]
         )
@@ -336,6 +343,7 @@ class DiffusionCrossAttTransformer(nn.Module):
         self.transition_block = nn.ModuleList(
             [DiffusionTransition(c_x=self.c_query, c_single_cond=self.c_single_cond, use_single_cond=True) for _ in range(self.num_blocks)])
 
+    @profile("DiffusionCrossAttTransformer")
     def forward(
         self,
         queries_act: torch.Tensor,  # (num_subsets, num_queries, ch)

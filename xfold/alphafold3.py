@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 DeepMind Technologies Limited
 #
 # AlphaFold 3 source code is licensed under CC BY-NC-SA 4.0. To view a copy of
@@ -11,6 +12,7 @@
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 
 from xfold import feat_batch, features
 from xfold.nn import featurization
@@ -19,6 +21,11 @@ from xfold.nn.head import DistogramHead, ConfidenceHead
 from xfold.nn.template import TemplateEmbedding
 from xfold.nn import atom_cross_attention
 from xfold.nn import diffusion_head
+from af3_kernels.tools import record_comm_time, print_comm_time, profile, USE_DIST
+
+import time
+from tqdm import tqdm, trange
+from loguru import logger
 
 
 class Evoformer(nn.Module):
@@ -69,6 +76,7 @@ class Evoformer(nn.Module):
         self.trunk_pairformer = nn.ModuleList(
             [PairformerBlock(with_single=True) for _ in range(self.pairformer_num_layer)])
 
+    @profile()
     def _relative_encoding(
         self, batch: feat_batch.Batch, pair_activations: torch.Tensor
     ) -> torch.Tensor:
@@ -84,6 +92,7 @@ class Evoformer(nn.Module):
         pair_activations += self.position_activations(rel_feat)
         return pair_activations
 
+    @profile()
     def _seq_pair_embedding(
         self, token_features: features.TokenFeatures, target_feat: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -98,6 +107,7 @@ class Evoformer(nn.Module):
 
         return pair_activations, pair_mask
 
+    @profile()
     def _embed_bonds(
         self, batch: feat_batch.Batch, pair_activations: torch.Tensor
     ) -> torch.Tensor:
@@ -145,6 +155,7 @@ class Evoformer(nn.Module):
 
         return pair_activations + bonds_act
 
+    @profile()
     def _embed_template_pair(
         self,
         batch: feat_batch.Batch,
@@ -168,6 +179,7 @@ class Evoformer(nn.Module):
 
         return pair_activations + template_act
 
+    @profile()
     def _embed_process_msa(
         self, msa_batch: features.MSA,
         pair_activations: torch.Tensor,
@@ -187,7 +199,7 @@ class Evoformer(nn.Module):
         msa_activations += self.extra_msa_target_feat(target_feat)[None]
 
         # Evoformer MSA stack.
-        for msa_block in self.msa_stack:
+        for msa_block in tqdm(self.msa_stack, desc="MSA stack"):
             msa_activations, pair_activations = msa_block(
                 msa=msa_activations,
                 pair=pair_activations,
@@ -197,11 +209,13 @@ class Evoformer(nn.Module):
 
         return pair_activations
 
+    @profile("Evoformer")
     def forward(
         self,
         batch: dict[str, torch.Tensor],
         prev: dict[str, torch.Tensor],
-        target_feat: torch.Tensor
+        target_feat: torch.Tensor,
+        idx: int = 0,
     ) -> dict[str, torch.Tensor]:
 
         pair_activations, pair_mask = self._seq_pair_embedding(
@@ -234,7 +248,7 @@ class Evoformer(nn.Module):
         single_activations += self.prev_single_embedding(
             self.prev_single_embedding_layer_norm(prev['single']))
 
-        for pairformer_b in self.trunk_pairformer:
+        for pairformer_b in tqdm(self.trunk_pairformer, desc=f"Pairformer {idx}"):
             pair_activations, single_activations = pairformer_b(
                 pair_activations, pair_mask, single_activations, batch.token_features.mask)
 
@@ -272,6 +286,7 @@ class AlphaFold3(nn.Module):
         self.distogram_head = DistogramHead()
         self.confidence_head = ConfidenceHead()
 
+    @profile()
     def create_target_feat_embedding(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         target_feat = featurization.create_target_feat(
             batch,
@@ -289,6 +304,7 @@ class AlphaFold3(nn.Module):
 
         return target_feat
 
+    @profile()
     def _apply_denoising_step(
         self,
         batch: feat_batch.Batch,
@@ -304,6 +320,7 @@ class AlphaFold3(nn.Module):
         )
 
         gamma = self.gamma_0 * (noise_level > self.gamma_min)
+        gamma = gamma.to(torch.bfloat16) # self.gamma_0 is float32
         t_hat = noise_level_prev * (1 + gamma)
 
         noise_scale = self.noise_scale * \
@@ -325,6 +342,7 @@ class AlphaFold3(nn.Module):
 
         return positions_out, noise_level
 
+    @profile()
     def _sample_diffusion(
         self,
         batch: feat_batch.Batch,
@@ -338,16 +356,16 @@ class AlphaFold3(nn.Module):
         device = mask.device
 
         noise_levels = diffusion_head.noise_schedule(
-            torch.linspace(0, 1, self.diffusion_steps + 1, device=device))
+            torch.linspace(0, 1, self.diffusion_steps + 1, device=device, dtype=torch.bfloat16))
 
         positions = torch.randn(
-            (num_samples,) + mask.shape + (3,), device=device)
+            (num_samples,) + mask.shape + (3,), device=device, dtype=torch.bfloat16)
         positions *= noise_levels[0]
 
         noise_level = torch.tile(noise_levels[None, 0], (num_samples,))
 
         for sample_idx in range(num_samples):
-            for step_idx in range(self.diffusion_steps):
+            for step_idx in trange(self.diffusion_steps, desc=f"Diffusion {sample_idx}"):
                 positions[sample_idx], noise_level[sample_idx] = self._apply_denoising_step(
                     batch, embeddings, positions[sample_idx], noise_level[sample_idx], mask, noise_levels[1 + step_idx])
 
@@ -355,6 +373,7 @@ class AlphaFold3(nn.Module):
 
         return {'atom_positions': positions, 'mask': final_dense_atom_mask}
 
+    @profile("AlphaFold3")
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         batch = feat_batch.Batch.from_data_dict(batch)
         num_res = batch.num_res
@@ -364,25 +383,35 @@ class AlphaFold3(nn.Module):
         embeddings = {
             'pair': torch.zeros(
                 [num_res, num_res, self.evoformer_pair_channel], device=target_feat.device,
-                dtype=torch.float32,
+                dtype=torch.bfloat16,
             ),
             'single': torch.zeros(
-                [num_res, self.evoformer_seq_channel], dtype=torch.float32, device=target_feat.device,
+                [num_res, self.evoformer_seq_channel], dtype=torch.bfloat16, device=target_feat.device,
             ),
             'target_feat': target_feat,  # type: ignore
         }
 
-        for _ in range(self.num_recycles):
+        t1 = time.time()
+        rk = dist.get_rank() if USE_DIST else 0
+        logger.info(f"rank {rk}: Start running Evoformer")
+        for i in range(self.num_recycles):
             embeddings = self.evoformer(
                 batch=batch,
                 prev=embeddings,
-                target_feat=target_feat
+                target_feat=target_feat,
+                idx=i,
             )
+            print_comm_time()
 
+        t2 = time.time()
+        logger.info(f"Time taken for Evoformer: {t2 - t1:.4f}s")
         samples = self._sample_diffusion(batch, embeddings)
+        t3 = time.time()
+        logger.info(f"Time taken for Diffusion: {t3 - t2:.4f}s")
+        print_comm_time()
 
         confidence_output_per_sample = []
-        for sample_dense_atom_position in samples['atom_positions']:
+        for sample_dense_atom_position in tqdm(samples['atom_positions'], desc="Confidence"):
             confidence_output_per_sample.append(self.confidence_head(
                 dense_atom_positions=sample_dense_atom_position,
                 embeddings=embeddings,
@@ -396,7 +425,15 @@ class AlphaFold3(nn.Module):
             confidence_output[key] = torch.stack(
                 [sample[key] for sample in confidence_output_per_sample], dim=0)
 
+        t4 = time.time()
+        logger.info(f"Time taken for Confidence: {t4 - t3:.4f}s")
+
+        if rk != 0:
+            logger.info(f"Skip distogram head for rank {rk}")
+            return None
+
         distogram = self.distogram_head(batch, embeddings)
+        logger.info(f"Time taken for Distogram: {time.time() - t4:.4f}s")
 
         return {
             'diffusion_samples': samples,

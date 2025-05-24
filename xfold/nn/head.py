@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -19,6 +20,7 @@ from xfold.constants import atom_types
 from xfold.nn import template, atom_layout, pairformer
 
 from xfold import fastnn
+from af3_kernels.tools import profile
 
 _CONTACT_THRESHOLD = 8.0
 _CONTACT_EPSILON = 1e-3
@@ -54,6 +56,7 @@ class DistogramHead(nn.Module):
 
         self.register_buffer('is_contact_bin', is_contact_bin)
 
+    @profile("DistogramHead")
     def forward(
         self,
         batch: feat_batch.Batch,
@@ -166,6 +169,7 @@ class ConfidenceHead(nn.Module):
         self.experimentally_resolved_logits = nn.Linear(
             self.c_single, self.num_atom * 2, bias=False)
 
+    @profile()
     def _embed_features(
         self,
         dense_atom_positions: torch.Tensor,
@@ -193,6 +197,7 @@ class ConfidenceHead(nn.Module):
 
         return out
 
+    @profile("ConfidenceHead")
     def forward(
         self,
         dense_atom_positions: torch.Tensor,
@@ -302,6 +307,7 @@ class ConfidenceHead(nn.Module):
             **pae_outputs,
         }
 
+    @profile()
     def _get_tmscore_adjusted_pae(self,
                                   asym_id: torch.Tensor,
                                   seq_mask: torch.Tensor,

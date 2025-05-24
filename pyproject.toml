@@ -4,13 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xfold"
-authors = [{ name = "Shenggan Cheng", email = "shenggan.c@u.nus.edu" }]
+authors = [
+    { name = "Shenggan Cheng", email = "shenggan.c@u.nus.edu" },
+    { name = "Dragon Archer", email = "dragon-archer@outlook.com" }
+]
 description = "fold for everyone."
 readme = { file = "README.md", content-type = "text/markdown" }
 dynamic = ["version"]
 dependencies = [
     "torch", 
     "einops",
+    "intel_extension_for_pytorch",
+    "loguru",
+    "af3_kernels",
 ]
 
 [tool.setuptools]

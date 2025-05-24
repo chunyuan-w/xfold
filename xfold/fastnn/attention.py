@@ -1,3 +1,5 @@
+# Copyright 2025 Xflops
+
 import math
 from typing import Optional
 
@@ -7,6 +9,7 @@ import triton
 import triton.language as tl
 
 from xfold.fastnn import config as fastnn_config
+from af3_kernels.tools import profile
 
 
 # CREDITS: Initially inspired by the Triton tutorial
@@ -212,6 +215,7 @@ def dot_product_attention_torch(q: torch.Tensor,
     return torch.matmul(weights, v)
 
 
+@profile()
 def dot_product_attention(q: torch.Tensor,
                           k: torch.Tensor,
                           v: torch.Tensor,

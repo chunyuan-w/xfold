@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 DeepMind Technologies Limited
 #
 # AlphaFold 3 source code is licensed under CC BY-NC-SA 4.0. To view a copy of
@@ -16,8 +17,10 @@ import torch
 from xfold import feat_batch, features
 from xfold.nn import utils
 from xfold.constants import residue_names
+from af3_kernels.tools import profile
 
 
+@profile()
 def gumbel_noise(
     shape: Sequence[int],
     device: torch.device,
@@ -41,6 +44,7 @@ def gumbel_noise(
     return gumbel
 
 
+@profile()
 def gumbel_argsort_sample_idx(
     logits: torch.Tensor,
     generator: Optional[torch.Generator] = None
@@ -64,6 +68,7 @@ def gumbel_argsort_sample_idx(
     return torch.argsort(logits + z, dim=-1, descending=True)
 
 
+@profile()
 def create_msa_feat(msa: features.MSA) -> torch.Tensor:
     """Create and concatenate MSA features."""
     msa_1hot = torch.nn.functional.one_hot(
@@ -84,12 +89,13 @@ def create_msa_feat(msa: features.MSA) -> torch.Tensor:
 
     return torch.concatenate(msa_feat, dim=-1)
 
-
+@profile()
 def truncate_msa_batch(msa: features.MSA, num_msa: int) -> features.MSA:
     indices = torch.arange(num_msa, device=msa.rows.device, dtype=torch.int64)
     return msa.index_msa_rows(indices)
 
 
+@profile()
 def create_target_feat(
     batch: feat_batch.Batch,
     append_per_atom_features: bool,
@@ -124,6 +130,7 @@ def create_target_feat(
     return torch.concatenate(target_features, dim=-1)
 
 
+@profile()
 def create_relative_encoding(
     seq_features: features.TokenFeatures,
     max_relative_idx: int,
@@ -210,6 +217,7 @@ def create_relative_encoding(
     return torch.concatenate(rel_feats, dim=-1)
 
 
+@profile()
 def shuffle_msa(
     msa: features.MSA
 ) -> features.MSA:

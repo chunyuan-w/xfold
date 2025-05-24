@@ -1,3 +1,4 @@
+# Copyright 2025 Xflops
 # Copyright 2024 xfold authors
 # Copyright 2024 DeepMind Technologies Limited
 #
@@ -14,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from xfold import fastnn
+from af3_kernels.tools import profile
 
 
 class Transition(nn.Module):
@@ -28,6 +30,7 @@ class Transition(nn.Module):
         self.transition2 = nn.Linear(
             self.num_intermediate_factor * c_x, c_x, bias=False)
 
+    @profile("Transition")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.input_layer_norm(x)
         c = fastnn.gated_linear_unit(x, self.transition1.weight.T)
@@ -54,6 +57,7 @@ class OuterProductMean(nn.Module):
         self.output_b = nn.Parameter(
             torch.randn(self.num_output_channel))
 
+    @profile("OuterProductMean")
     def forward(self, msa: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         mask = mask.unsqueeze(-1)
         msa = self.layer_norm_input(msa)

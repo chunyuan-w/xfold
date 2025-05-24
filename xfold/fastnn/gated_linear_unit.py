@@ -1,9 +1,12 @@
+# Copyright 2025 Xflops
+
 import torch
 
 import triton
 import triton.language as tl
 
 from xfold.fastnn import config as fastnn_config
+from af3_kernels.tools import profile
 
 
 def get_cuda_autotune_config():
@@ -119,7 +122,8 @@ def gated_linear_unit_torch(x, weight):
     return out
 
 
-def gated_linear_unit(x, weight):
+@profile()
+def gated_linear_unit(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     if fastnn_config.gated_linear_unit_implementation == "torch":
         out = gated_linear_unit_torch(x, weight)
     if fastnn_config.gated_linear_unit_implementation == "triton":
