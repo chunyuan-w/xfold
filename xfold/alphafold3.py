@@ -76,6 +76,14 @@ class Evoformer(nn.Module):
         self.trunk_pairformer = nn.ModuleList(
             [PairformerBlock(with_single=True) for _ in range(self.pairformer_num_layer)])
 
+        self.first_run = True
+        self.pair_activations = None
+        self.pair_mask = None
+        self.first_run_relative_encoding = True
+        self.rel_feat = None
+        self.first_run_embed_bonds = True
+        self.bonds_act = None
+
     @profile()
     def _relative_encoding(
         self, batch: feat_batch.Batch, pair_activations: torch.Tensor
@@ -83,13 +91,16 @@ class Evoformer(nn.Module):
         max_relative_idx = 32
         max_relative_chain = 2
 
-        rel_feat = featurization.create_relative_encoding(
-            batch.token_features,
-            max_relative_idx,
-            max_relative_chain,
-        ).to(dtype=pair_activations.dtype)
+        if self.first_run_relative_encoding:
+            self.first_run_relative_encoding = False
+            self.rel_feat = featurization.create_relative_encoding(
+                batch.token_features,
+                max_relative_idx,
+                max_relative_chain,
+            ).to(dtype=pair_activations.dtype)
+            self.rel_feat = self.position_activations(self.rel_feat)
 
-        pair_activations += self.position_activations(rel_feat)
+        pair_activations += self.rel_feat
         return pair_activations
 
     @profile()
@@ -113,47 +124,51 @@ class Evoformer(nn.Module):
     ) -> torch.Tensor:
         """Embeds bond features and merges into pair activations."""
         # Construct contact matrix.
-        num_tokens = batch.token_features.token_index.shape[0]
-        contact_matrix = torch.zeros(
-            (num_tokens, num_tokens), dtype=pair_activations.dtype, device=pair_activations.device)
+        if self.first_run_embed_bonds:
+            self.first_run_embed_bonds = False
+            num_tokens = batch.token_features.token_index.shape[0]
+            contact_matrix = torch.zeros(
+                (num_tokens, num_tokens), dtype=pair_activations.dtype, device=pair_activations.device
+            )
 
-        tokens_to_polymer_ligand_bonds = (
-            batch.polymer_ligand_bond_info.tokens_to_polymer_ligand_bonds
-        )
-        gather_idxs_polymer_ligand = tokens_to_polymer_ligand_bonds.gather_idxs
-        gather_mask_polymer_ligand = (
-            tokens_to_polymer_ligand_bonds.gather_mask.prod(dim=1).to(
-                dtype=gather_idxs_polymer_ligand.dtype)[:, None]
-        )
-        # If valid mask then it will be all 1's, so idxs should be unchanged.
-        gather_idxs_polymer_ligand = (
-            gather_idxs_polymer_ligand * gather_mask_polymer_ligand
-        )
+            tokens_to_polymer_ligand_bonds = (
+                batch.polymer_ligand_bond_info.tokens_to_polymer_ligand_bonds
+            )
+            gather_idxs_polymer_ligand = tokens_to_polymer_ligand_bonds.gather_idxs
+            gather_mask_polymer_ligand = (
+                tokens_to_polymer_ligand_bonds.gather_mask.prod(dim=1).to(
+                    dtype=gather_idxs_polymer_ligand.dtype)[:, None]
+            )
+            # If valid mask then it will be all 1's, so idxs should be unchanged.
+            gather_idxs_polymer_ligand = (
+                gather_idxs_polymer_ligand * gather_mask_polymer_ligand
+            )
 
-        tokens_to_ligand_ligand_bonds = (
-            batch.ligand_ligand_bond_info.tokens_to_ligand_ligand_bonds
-        )
-        gather_idxs_ligand_ligand = tokens_to_ligand_ligand_bonds.gather_idxs
-        gather_mask_ligand_ligand = tokens_to_ligand_ligand_bonds.gather_mask.prod(
-            dim=1
-        ).to(dtype=gather_idxs_ligand_ligand.dtype)[:, None]
-        gather_idxs_ligand_ligand = (
-            gather_idxs_ligand_ligand * gather_mask_ligand_ligand
-        )
+            tokens_to_ligand_ligand_bonds = (
+                batch.ligand_ligand_bond_info.tokens_to_ligand_ligand_bonds
+            )
+            gather_idxs_ligand_ligand = tokens_to_ligand_ligand_bonds.gather_idxs
+            gather_mask_ligand_ligand = tokens_to_ligand_ligand_bonds.gather_mask.prod(
+                dim=1
+            ).to(dtype=gather_idxs_ligand_ligand.dtype)[:, None]
+            gather_idxs_ligand_ligand = (
+                gather_idxs_ligand_ligand * gather_mask_ligand_ligand
+            )
 
-        gather_idxs = torch.concatenate(
-            [gather_idxs_polymer_ligand, gather_idxs_ligand_ligand]
-        )
-        contact_matrix[
-            gather_idxs[:, 0], gather_idxs[:, 1]
-        ] = 1.0
+            gather_idxs = torch.concatenate(
+                [gather_idxs_polymer_ligand, gather_idxs_ligand_ligand]
+            )
+            contact_matrix[
+                gather_idxs[:, 0], gather_idxs[:, 1]
+            ] = 1.0
 
-        # Because all the padded index's are 0's.
-        contact_matrix[0, 0] = 0.0
+            # Because all the padded index's are 0's.
+            contact_matrix[0, 0] = 0.0
 
-        bonds_act = self.bond_embedding(contact_matrix[:, :, None])
+            bonds_act = self.bond_embedding(contact_matrix[:, :, None])
+            self.bonds_act = bonds_act
 
-        return pair_activations + bonds_act
+        return pair_activations + self.bonds_act
 
     @profile()
     def _embed_template_pair(
@@ -212,15 +227,16 @@ class Evoformer(nn.Module):
     @profile("Evoformer")
     def forward(
         self,
-        batch: dict[str, torch.Tensor],
-        prev: dict[str, torch.Tensor],
-        target_feat: torch.Tensor,
+        batch: dict[str, torch.Tensor],  # constant
+        prev: dict[str, torch.Tensor],  # variable
+        target_feat: torch.Tensor,  # constant
         idx: int = 0,
     ) -> dict[str, torch.Tensor]:
 
-        pair_activations, pair_mask = self._seq_pair_embedding(
-            batch.token_features, target_feat
-        )
+        if self.first_run:
+            self.first_run = False
+            self.pair_activations, self.pair_mask = self._seq_pair_embedding(batch.token_features, target_feat)
+        pair_activations = self.pair_activations.clone()
 
         pair_activations += self.prev_embedding(
             self.prev_embedding_layer_norm(prev['pair']))
@@ -234,13 +250,13 @@ class Evoformer(nn.Module):
         pair_activations = self._embed_template_pair(
             batch=batch,
             pair_activations=pair_activations,
-            pair_mask=pair_mask,
+            pair_mask=self.pair_mask,
         )
 
         pair_activations = self._embed_process_msa(
             msa_batch=batch.msa,
             pair_activations=pair_activations,
-            pair_mask=pair_mask,
+            pair_mask=self.pair_mask,
             target_feat=target_feat,
         )
 
@@ -250,7 +266,7 @@ class Evoformer(nn.Module):
 
         for pairformer_b in tqdm(self.trunk_pairformer, desc=f"Pairformer {idx}"):
             pair_activations, single_activations = pairformer_b(
-                pair_activations, pair_mask, single_activations, batch.token_features.mask)
+                pair_activations, self.pair_mask, single_activations, batch.token_features.mask)
 
         output = {
             'single': single_activations,

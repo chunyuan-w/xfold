@@ -27,13 +27,16 @@ class Transition(nn.Module):
         self.input_layer_norm = fastnn.LayerNorm(c_x)
         self.transition1 = nn.Linear(
             c_x, self.num_intermediate_factor * c_x * 2, bias=False)
+        self.transition1_weight_t = None # cache transposed weight
         self.transition2 = nn.Linear(
             self.num_intermediate_factor * c_x, c_x, bias=False)
 
     @profile("Transition")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.input_layer_norm(x)
-        c = fastnn.gated_linear_unit(x, self.transition1.weight.T)
+        if self.transition1_weight_t is None:
+            self.transition1_weight_t = self.transition1.weight.T.contiguous()
+        c = fastnn.gated_linear_unit(x, self.transition1_weight_t)
         return self.transition2(c)
 
 

@@ -143,35 +143,46 @@ class DiffusionHead(nn.Module):
 
         self.fourier_embeddings = FourierEmbeddings(dim=256)
 
+        self.first_run = True
+        self.single_cond = None
+        self.pair_cond = None
+
     @profile()
     def _conditioning(
         self,
-        batch,
-        embeddings: dict[str, torch.Tensor],
-        noise_level: torch.Tensor,
-        use_conditioning: bool,
+        batch,  # constant
+        embeddings: dict[str, torch.Tensor],  # constant
+        noise_level: torch.Tensor,  # variable
+        use_conditioning: bool,  # True
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        single_embedding = use_conditioning * embeddings['single']
-        pair_embedding = use_conditioning * embeddings['pair']
+        if self.first_run:
+            self.first_run = False
+            single_embedding = use_conditioning * embeddings['single']
+            pair_embedding = use_conditioning * embeddings['pair']
 
-        rel_features = featurization.create_relative_encoding(
-            batch.token_features, max_relative_idx=32, max_relative_chain=2
-        ).to(dtype=pair_embedding.dtype)
-        features_2d = torch.concatenate([pair_embedding, rel_features], dim=-1)
+            rel_features = featurization.create_relative_encoding(
+                batch.token_features, max_relative_idx=32, max_relative_chain=2
+            ).to(dtype=pair_embedding.dtype)
+            features_2d = torch.concatenate([pair_embedding, rel_features], dim=-1)
 
-        pair_cond = self.pair_cond_initial_projection(
-            self.pair_cond_initial_norm(features_2d)
-        )
+            pair_cond = self.pair_cond_initial_projection(
+                self.pair_cond_initial_norm(features_2d)
+            )
 
-        pair_cond += self.pair_transition_0(pair_cond)
-        pair_cond += self.pair_transition_1(pair_cond)
+            pair_cond += self.pair_transition_0(pair_cond)
+            pair_cond += self.pair_transition_1(pair_cond)
 
-        target_feat = embeddings['target_feat']
-        features_1d = torch.concatenate(
-            [single_embedding, target_feat], dim=-1)
-        single_cond = self.single_cond_initial_projection(
-            self.single_cond_initial_norm(features_1d))
+            target_feat = embeddings['target_feat']
+            features_1d = torch.concatenate(
+                [single_embedding, target_feat], dim=-1)
+            single_cond = self.single_cond_initial_projection(
+                self.single_cond_initial_norm(features_1d))
 
+            self.single_cond = single_cond
+            self.pair_cond = pair_cond
+
+        single_cond = self.single_cond.clone()  # will be changed
+        pair_cond = self.pair_cond
         noise_embedding = self.fourier_embeddings(
             (1 / 4) * torch.log(noise_level / SIGMA_DATA)
         )
@@ -188,11 +199,11 @@ class DiffusionHead(nn.Module):
     @profile("DiffusionHead")
     def forward(
         self,
-        positions_noisy: torch.Tensor,
-        noise_level: torch.Tensor,
-        batch: feat_batch.Batch,
-        embeddings: dict[str, torch.Tensor],
-        use_conditioning: bool
+        positions_noisy: torch.Tensor,  # variable
+        noise_level: torch.Tensor,  # variable
+        batch: feat_batch.Batch,  # constant
+        embeddings: dict[str, torch.Tensor],  # constant
+        use_conditioning: bool,  # True
     ) -> torch.Tensor:
         # Get conditioning
         trunk_single_cond, trunk_pair_cond = self._conditioning(

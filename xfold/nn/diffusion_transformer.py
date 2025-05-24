@@ -113,6 +113,7 @@ class DiffusionTransition(nn.Module):
             self.c_x, self.c_single_cond, self.use_single_cond)
         self.transition1 = nn.Linear(
             self.c_x, 2 * self.c_x * self.num_intermediate_factor, bias=False)
+        self.transition1_weight_t = None  # cache transposed weight
 
         self.adaptive_zero_init = AdaLNZero(
             self.num_intermediate_factor * self.c_x,
@@ -124,7 +125,9 @@ class DiffusionTransition(nn.Module):
     @profile("DiffusionTransition")
     def forward(self, x: torch.Tensor, single_cond: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.adaptive_layernorm(x, single_cond)
-        c = fastnn.gated_linear_unit(x, self.transition1.weight.T)
+        if self.transition1_weight_t is None:
+            self.transition1_weight_t = self.transition1.weight.T.contiguous()
+        c = fastnn.gated_linear_unit(x, self.transition1_weight_t)
         return self.adaptive_zero_init(c, single_cond)
 
 
@@ -222,22 +225,30 @@ class DiffusionTransformer(nn.Module):
         self.transition_block = nn.ModuleList(
             [DiffusionTransition(self.c_act, self.c_single_cond, use_single_cond=True) for _ in range(self.num_blocks)])
 
+        self.first_run = True
+        self.pair_logits_list = []
+
     @profile("DiffusionTransformer")
     def forward(self,
-                act: torch.Tensor,
-                mask: torch.Tensor,
-                single_cond: torch.Tensor,
-                pair_cond:  torch.Tensor):
+                act: torch.Tensor,  # variable
+                mask: torch.Tensor,  # constant
+                single_cond: torch.Tensor,  # variable
+                pair_cond: torch.Tensor,  # constant
+            ) -> torch.Tensor:
+        if self.first_run:
+            self.first_run = False
+            pair_act = self.pair_input_layer_norm(pair_cond)
 
-        pair_act = self.pair_input_layer_norm(pair_cond)
+            for super_block_i in range(self.num_super_blocks):
+                pair_logits = self.pair_logits_projection[super_block_i](pair_act)
+                pair_logits = einops.rearrange(
+                    pair_logits, 'n s (b h) -> b h n s', h=self.num_head)
+                self.pair_logits_list.append(pair_logits.clone())  # TODO(accuracy): find out whether this is necessary
 
         for super_block_i in range(self.num_super_blocks):
-            pair_logits = self.pair_logits_projection[super_block_i](pair_act)
-            pair_logits = einops.rearrange(
-                pair_logits, 'n s (b h) -> b h n s', h=self.num_head)
             for j in range(self.super_block_size):
                 act += self.self_attention[super_block_i * self.super_block_size + j](
-                    act, mask, pair_logits[j, ...], single_cond)
+                    act, mask, self.pair_logits_list[super_block_i][j, ...], single_cond)
                 act += self.transition_block[super_block_i *
                                              self.super_block_size + j](act, single_cond)
 
@@ -343,10 +354,13 @@ class DiffusionCrossAttTransformer(nn.Module):
         self.transition_block = nn.ModuleList(
             [DiffusionTransition(c_x=self.c_query, c_single_cond=self.c_single_cond, use_single_cond=True) for _ in range(self.num_blocks)])
 
+        self.first_run = True
+        self.pair_logits = None
+
     @profile("DiffusionCrossAttTransformer")
     def forward(
         self,
-        queries_act: torch.Tensor,  # (num_subsets, num_queries, ch)
+        queries_act: torch.Tensor,  # (num_subsets, num_queries, ch) # The only variable
         queries_mask: torch.Tensor,  # (num_subsets, num_queries)
         queries_to_keys: atom_layout.GatherInfo,  # (num_subsets, num_keys)
         keys_mask: torch.Tensor,  # (num_subsets, num_keys)
@@ -355,11 +369,15 @@ class DiffusionCrossAttTransformer(nn.Module):
         pair_cond: torch.Tensor,  # (num_subsets, num_queries, num_keys, ch)
     ) -> torch.Tensor:
 
-        pair_act = self.pair_input_layer_norm(pair_cond)
-        pair_logits = self.pair_logits_projection(pair_act)
+        if self.first_run:
+            self.first_run = False
+            pair_act = self.pair_input_layer_norm(pair_cond)
+            pair_logits = self.pair_logits_projection(pair_act)
 
-        pair_logits = einops.rearrange(
-            pair_logits, 'n q k (b h) -> b n h q k', h=self.num_head)
+            pair_logits = einops.rearrange(
+                pair_logits, 'n q k (b h) -> b n h q k', h=self.num_head)
+
+            self.pair_logits = pair_logits
 
         for block_idx in range(self.num_blocks):
             keys_act = atom_layout.convert(
@@ -371,7 +389,7 @@ class DiffusionCrossAttTransformer(nn.Module):
                 x_k=keys_act,
                 mask_q=queries_mask,
                 mask_k=keys_mask,
-                pair_logits=pair_logits[block_idx,...],
+                pair_logits=self.pair_logits[block_idx,...],
                 single_cond_q=queries_single_cond,
                 single_cond_k=keys_single_cond,
             )
