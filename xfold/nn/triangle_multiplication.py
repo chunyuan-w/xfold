@@ -15,12 +15,14 @@ import torch
 import torch.nn as nn
 
 from xfold import fastnn
+from xfold.fastnn import config as fastnn_config
+from af3_kernels import TriangleMultiplicationCpp, DistributedTriangleMultiplicationCpp
 from af3_kernels.tools import profile
 
 
-class TriangleMultiplication(nn.Module):
+class TriangleMultiplicationTorch(nn.Module):
     def __init__(self, c_pair: int = 128, _outgoing: bool = True) -> None:
-        super(TriangleMultiplication, self).__init__()
+        super(TriangleMultiplicationTorch, self).__init__()
 
         self.c_pair = c_pair
         self.left_norm_input = fastnn.LayerNorm(self.c_pair)
@@ -44,7 +46,7 @@ class TriangleMultiplication(nn.Module):
         Returns:
             torch.Tensor: [N_token, N_token, c_pair]
         """
-
+        input = pair
         pair = self.left_norm_input(pair)
         input_pair = pair
 
@@ -69,5 +71,14 @@ class TriangleMultiplication(nn.Module):
 
         gate_out = self.gating_linear(input_pair)
         pair *= torch.sigmoid(gate_out)
+        input += pair
+        return input
 
-        return pair
+
+if fastnn_config.triangle_multiplication_implementation == "cpp":
+    if fastnn_config.triangle_multiplication_dist:
+        TriangleMultiplication = DistributedTriangleMultiplicationCpp
+    else:
+        TriangleMultiplication = TriangleMultiplicationCpp
+else:
+    TriangleMultiplication = TriangleMultiplicationTorch

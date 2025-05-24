@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.distributed as dist
 
 from xfold import feat_batch, features
+from xfold import fastnn
 from xfold.nn import featurization
 from xfold.nn.pairformer import EvoformerBlock, PairformerBlock
 from xfold.nn.head import DistogramHead, ConfidenceHead
@@ -46,7 +47,7 @@ class Evoformer(nn.Module):
         self.right_single = nn.Linear(
             self.c_target_feat, self.pair_channel, bias=False)
 
-        self.prev_embedding_layer_norm = nn.LayerNorm(self.pair_channel)
+        self.prev_embedding_layer_norm = fastnn.LayerNorm(self.pair_channel)
         self.prev_embedding = nn.Linear(
             self.pair_channel, self.pair_channel, bias=False)
 
@@ -69,7 +70,7 @@ class Evoformer(nn.Module):
         self.single_activations = nn.Linear(
             self.c_target_feat, self.seq_channel, bias=False)
 
-        self.prev_single_embedding_layer_norm = nn.LayerNorm(self.seq_channel)
+        self.prev_single_embedding_layer_norm = fastnn.LayerNorm(self.seq_channel)
         self.prev_single_embedding = nn.Linear(
             self.seq_channel, self.seq_channel, bias=False)
 
@@ -356,7 +357,7 @@ class AlphaFold3(nn.Module):
         d_t = noise_level - t_hat
         positions_out = positions_noisy + self.step_scale * d_t * grad
 
-        return positions_out, noise_level
+        return positions_out
 
     @profile()
     def _sample_diffusion(
@@ -378,12 +379,80 @@ class AlphaFold3(nn.Module):
             (num_samples,) + mask.shape + (3,), device=device, dtype=torch.bfloat16)
         positions *= noise_levels[0]
 
-        noise_level = torch.tile(noise_levels[None, 0], (num_samples,))
+        assert self.diffusion_steps == 200
+        assert num_samples == 5
 
-        for sample_idx in range(num_samples):
-            for step_idx in trange(self.diffusion_steps, desc=f"Diffusion {sample_idx}"):
-                positions[sample_idx], noise_level[sample_idx] = self._apply_denoising_step(
-                    batch, embeddings, positions[sample_idx], noise_level[sample_idx], mask, noise_levels[1 + step_idx])
+        if USE_DIST:
+            rk, ws = dist.get_rank(), dist.get_world_size()
+
+            assert ws <= 5, f"World size {ws} is currently not supported. Please set world size to 5 or less."
+
+            # Scheme description:
+            # 1. solution[ws][rk] is a list of tuples (sample_idx, begin, end), means that
+            #    `rk` will run `positions[sample_idx]` for [begin, end) when world size is `ws`.
+            # 2. solution[ws][ws] is a list of tuples (from_rk, sample_id), means that
+            #    `positions[sample_id]` be broadcasted from `from_rk` to all other ranks.
+            # Note that currently the workflow is handcrafted for at most 5 ranks.
+            # The main purpose is to reduce the number of broadcast operations.
+
+            solution = [[] for _ in range(6)]
+
+            solution[1].append([(i, 0, 200) for i in range(5)])
+            solution[1].append([() for _ in range(5)])
+
+            solution[2].append([(0, 0, 200), (2, 0, 100), (4, 0, 100), (4, 100, 200)])
+            solution[2].append([(1, 0, 200), (3, 0, 100), (3, 100, 200), (2, 100, 200)])
+            solution[2].append([(), (), ((0, 2),), ((1, 1), (1, 2), (1, 3), (0, 0), (0, 4))])
+
+            solution[3].append([(0, 0, 66), (3, 0, 66), (4, 0, 66), (4, 66, 200)])
+            solution[3].append([(1, 0, 66), (1, 66, 134), (1, 134, 200), (3, 66, 200)])
+            solution[3].append([(2, 0, 66), (2, 66, 134), (2, 134, 200), (0, 66, 200)])
+            solution[3].append([(), (), ((0, 3), (0, 0)), ((1, 3), (1, 1), (2, 0), (2, 2), (0, 4))])
+
+            solution[4].append([(0, 0, 50), (4, 0, 50), (4, 50, 100), (4, 100, 150), (4, 150, 200)])
+            solution[4].append([(1, 0, 50), (1, 50, 100), (0, 50, 100), (0, 100, 150), (0, 150, 200)])
+            solution[4].append([(2, 0, 50), (2, 50, 100), (2, 100, 150), (1, 100, 150), (1, 150, 200)])
+            solution[4].append([(3, 0, 50), (3, 50, 100), (3, 100, 150), (3, 150, 200), (2, 150, 200)])
+            solution[4].append([(), ((0, 0), (1, 1)), (), ((2, 2), (3, 3)), ((0, 4), (1, 0), (2, 1), (3, 2))])
+
+            solution[5].append([(0, 0, 200)])
+            solution[5].append([(1, 0, 200)])
+            solution[5].append([(2, 0, 200)])
+            solution[5].append([(3, 0, 200)])
+            solution[5].append([(4, 0, 200)])
+            solution[5].append([((0, 0), (1, 1), (2, 2), (3, 3), (4, 4))])
+
+            for idx, (sample_idx, begin, end) in enumerate(solution[ws][rk]):
+                logger.info(f"Diffusion {idx}, running for {sample_idx} from {begin} to {end}")
+                for step_idx in trange(begin, end):
+                    positions[sample_idx] = self._apply_denoising_step(
+                        batch,
+                        embeddings,
+                        positions[sample_idx],
+                        noise_levels[step_idx],
+                        mask,
+                        noise_levels[1 + step_idx],
+                    )
+                for from_rk, sample_id in solution[ws][ws][idx]:
+                    logger.info(f"Diffusion {idx}, broadcasting {sample_id} from {from_rk}")
+                    start = time.time()
+                    dist.broadcast(positions[sample_id], src=from_rk)
+                    record_comm_time(
+                        "bcast",
+                        time.time() - start,
+                        positions[sample_id].numel() * positions[sample_id].itemsize * (ws - 1),
+                    )
+        else:
+            for sample_idx in range(num_samples):
+                for step_idx in trange(self.diffusion_steps, desc=f"Diffusion {sample_idx}"):
+                    positions[sample_idx] = self._apply_denoising_step(
+                        batch,
+                        embeddings,
+                        positions[sample_idx],
+                        noise_levels[step_idx],
+                        mask,
+                        noise_levels[1 + step_idx],
+                    )
 
         final_dense_atom_mask = torch.tile(mask[None], (num_samples, 1, 1))
 

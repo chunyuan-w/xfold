@@ -15,12 +15,14 @@ import torch
 import torch.nn as nn
 
 from xfold import fastnn
+from xfold.fastnn import config as fastnn_config
+from af3_kernels import GridSelfAttentionCpp, DistributedGridSelfAttentionCpp
 from af3_kernels.tools import profile
 
 
-class GridSelfAttention(nn.Module):
+class GridSelfAttentionTorch(nn.Module):
     def __init__(self, c_pair: int = 128, num_head: int = 4, transpose: bool = False):
-        super(GridSelfAttention, self).__init__()
+        super(GridSelfAttentionTorch, self).__init__()
         self.c_pair = c_pair
         self.num_head = num_head
         self.qkv_dim = self.c_pair // self.num_head
@@ -80,6 +82,15 @@ class GridSelfAttention(nn.Module):
             pair = pair.permute(1, 0, 2)
 
         return pair
+
+
+if fastnn_config.grid_self_attention_implementation == "cpp":
+    if fastnn_config.grid_self_attention_dist:
+        GridSelfAttention = DistributedGridSelfAttentionCpp
+    else:
+        GridSelfAttention = GridSelfAttentionCpp
+else:
+    GridSelfAttention = GridSelfAttentionTorch
 
 
 class MSAAttention(nn.Module):

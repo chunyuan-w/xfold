@@ -276,10 +276,10 @@ class ModelRunner:
 
         self._model = self._model.to(device=self._device)
 
-        if _USE_FASTNN.value is True:
-            fastnn_config.layer_norm_implementation = 'triton'
-            fastnn_config.dot_product_attention_implementation = 'triton'
-            fastnn_config.gated_linear_unit_implementation = 'triton'
+        if _USE_FASTNN.value is False:
+            fastnn_config.layer_norm_implementation = 'torch'
+            fastnn_config.dot_product_attention_implementation = 'torch'
+            fastnn_config.gated_linear_unit_implementation = 'torch'
 
     @torch.inference_mode()
     def run_inference(

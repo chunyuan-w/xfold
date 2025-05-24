@@ -9,6 +9,7 @@ import triton
 import triton.language as tl
 
 from xfold.fastnn import config as fastnn_config
+from af3_kernels import dot_product_attention_cpp
 from af3_kernels.tools import profile
 
 
@@ -228,7 +229,15 @@ def dot_product_attention(q: torch.Tensor,
         k = k.unsqueeze(0)
         v = v.unsqueeze(0)
 
-    if fastnn_config.dot_product_attention_implementation == "torch":
+    if fastnn_config.dot_product_attention_implementation == "cpp":
+        if bias is None:
+            bias = torch.zeros(q.shape[1], q.shape[3], q.shape[3], device=q.device, dtype=q.dtype)
+        if mask is None:
+            mask = torch.ones(q.shape[0], q.shape[3], device=q.device, dtype=torch.bool)
+        out = dot_product_attention_cpp(
+            q, k, v, mask, bias
+        ).nan_to_num_()  # TODO(accuacy): find out how NaN is generated
+    elif fastnn_config.dot_product_attention_implementation == "torch":
         out = dot_product_attention_torch(q, k, v, mask, bias)
     elif fastnn_config.dot_product_attention_implementation == "triton":
         if k.shape[-1] not in {16, 32, 64, 128}:

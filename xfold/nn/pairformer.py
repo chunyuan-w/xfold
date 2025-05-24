@@ -73,7 +73,7 @@ class PairformerBlock(nn.Module):
             self.single_pair_logits_projection = nn.Linear(
                 c_pair, n_heads, bias=False)
             self.single_attention_ = SelfAttention(
-                c_x=c_single, num_head=n_heads, use_single_cond=False)
+                c_x=c_single, num_head=n_heads, use_single_cond=False, is_decoder=False)
             self.single_transition = Transition(c_x=self.c_single)
 
     @profile("PairformerBlock")
@@ -96,8 +96,9 @@ class PairformerBlock(nn.Module):
         Returns:
             tuple[torch.Tensor, Optional[torch.Tensor]]: pair, single
         """
-        pair += self.triangle_multiplication_outgoing(pair, mask=pair_mask)
-        pair += self.triangle_multiplication_incoming(pair, mask=pair_mask)
+        # NOTE: not += since it's fused
+        pair = self.triangle_multiplication_outgoing(pair, mask=pair_mask)
+        pair = self.triangle_multiplication_incoming(pair, mask=pair_mask)
         pair += self.pair_attention1(pair, mask=pair_mask)
         pair += self.pair_attention2(pair, mask=pair_mask)
         pair += self.pair_transition(pair)
@@ -151,8 +152,9 @@ class EvoformerBlock(nn.Module):
         msa += self.msa_attention1(msa, msa_mask, pair)
         msa += self.msa_transition(msa)
 
-        pair += self.triangle_multiplication_outgoing(pair, mask=pair_mask)
-        pair += self.triangle_multiplication_incoming(pair, mask=pair_mask)
+        # NOTE: not += since it's fused
+        pair = self.triangle_multiplication_outgoing(pair, mask=pair_mask)
+        pair = self.triangle_multiplication_incoming(pair, mask=pair_mask)
         pair += self.pair_attention1(pair, mask=pair_mask)
         pair += self.pair_attention2(pair, mask=pair_mask)
         pair += self.pair_transition(pair)

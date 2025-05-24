@@ -6,6 +6,7 @@ import triton
 import triton.language as tl
 
 from xfold.fastnn import config as fastnn_config
+from af3_kernels import gated_linear_unit_cpp
 from af3_kernels.tools import profile
 
 
@@ -124,8 +125,10 @@ def gated_linear_unit_torch(x, weight):
 
 @profile()
 def gated_linear_unit(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    if fastnn_config.gated_linear_unit_implementation == "torch":
+    if fastnn_config.gated_linear_unit_implementation == "cpp":
+        out = gated_linear_unit_cpp(x, weight)
+    elif fastnn_config.gated_linear_unit_implementation == "torch":
         out = gated_linear_unit_torch(x, weight)
-    if fastnn_config.gated_linear_unit_implementation == "triton":
+    elif fastnn_config.gated_linear_unit_implementation == "triton":
         out = gated_linear_unit_triton(x, weight)
     return out

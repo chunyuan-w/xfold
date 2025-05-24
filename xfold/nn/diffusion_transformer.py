@@ -20,6 +20,8 @@ import einops
 
 from xfold.nn import atom_layout
 from xfold import fastnn
+from xfold.fastnn import config as fastnn_config
+from af3_kernels import vnni_repack_tensor, self_attention_cpp, pad_and_align_tensor
 from af3_kernels.tools import profile
 
 
@@ -131,18 +133,20 @@ class DiffusionTransition(nn.Module):
         return self.adaptive_zero_init(c, single_cond)
 
 
-class SelfAttention(nn.Module):
+class SelfAttentionTorch(nn.Module):
     def __init__(self,
                  c_x: int = 768,
                  c_single_cond: int = 384,
                  num_head: int = 16,
-                 use_single_cond: bool = False) -> None:
+                 use_single_cond: bool = False,
+                 is_decoder: bool = True) -> None:
 
-        super(SelfAttention, self).__init__()
+        super(SelfAttentionTorch, self).__init__()
 
         self.c_x = c_x
         self.c_single_cond = c_single_cond
         self.num_head = num_head
+        self.is_decoder = is_decoder
 
         self.qkv_dim = self.c_x // self.num_head
         self.use_single_cond = use_single_cond
@@ -159,11 +163,14 @@ class SelfAttention(nn.Module):
         self.adaptive_zero_init = AdaLNZero(
             self.c_x, self.c_x, self.c_single_cond, self.use_single_cond)
 
+        self.first_run = True
+        self.padded_pair_logits = None
+
     @profile("SelfAttention")
     def forward(self,
-                x: torch.Tensor,
-                mask: torch.Tensor,
-                pair_logits: Optional[torch.Tensor] = None,
+                x: torch.Tensor,  # variable
+                mask: torch.Tensor,  # constant
+                pair_logits: Optional[torch.Tensor] = None,  # constant for each SelfAttention
                 single_cond: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Args:
@@ -173,6 +180,19 @@ class SelfAttention(nn.Module):
         """
 
         assert (single_cond is None) == (self.use_single_cond is False)
+
+        BLK_SZ = 128 if x.shape[0] > 1536 else 64
+
+        if self.first_run:
+            self.first_run = False
+            if self.is_decoder and fastnn_config.dot_product_attention_implementation == "cpp":
+                padded_size = ((x.shape[0] + BLK_SZ - 1) // BLK_SZ) * BLK_SZ
+                self.padded_pair_logits = pad_and_align_tensor(pair_logits, (self.num_head, padded_size, padded_size))
+            else:
+                self.padded_pair_logits = pair_logits
+
+        if not self.is_decoder:
+            self.padded_pair_logits = pair_logits
 
         x = self.adaptive_layernorm(x, single_cond)
 
@@ -184,7 +204,7 @@ class SelfAttention(nn.Module):
             t, 'n (h c) -> h n c', h=self.num_head).unsqueeze(0), [q, k, v])
 
         weighted_avg = fastnn.dot_product_attention(
-            q, k, v, mask=mask, bias=pair_logits
+            q, k, v, mask=mask, bias=self.padded_pair_logits
         )
 
         weighted_avg = weighted_avg.squeeze(0)
@@ -194,6 +214,105 @@ class SelfAttention(nn.Module):
         weighted_avg *= torch.sigmoid(gate_logits)
 
         return self.adaptive_zero_init(weighted_avg, single_cond)
+
+
+class SelfAttentionCpp(nn.Module):
+    def __init__(
+        self,
+        c_x: int = 768,
+        c_single_cond: int = 384,
+        num_head: int = 16,
+        use_single_cond: bool = False,
+        is_decoder: bool = True,
+    ) -> None:
+
+        super(SelfAttentionCpp, self).__init__()
+
+        self.c_x = c_x
+        self.c_single_cond = c_single_cond
+        self.num_head = num_head
+        self.is_decoder = is_decoder
+
+        self.qkv_dim = self.c_x // self.num_head
+        self.use_single_cond = use_single_cond
+
+        self.adaptive_layernorm = AdaptiveLayerNorm(self.c_x, self.c_single_cond, self.use_single_cond)
+
+        self.q_projection = nn.Linear(self.c_x, self.c_x, bias=True)
+        self.k_projection = nn.Linear(self.c_x, self.c_x, bias=False)
+        self.v_projection = nn.Linear(self.c_x, self.c_x, bias=False)
+
+        self.gating_query = nn.Linear(self.c_x, self.c_x, bias=False)
+
+        self.adaptive_zero_init = AdaLNZero(self.c_x, self.c_x, self.c_single_cond, self.use_single_cond)
+
+        self.first_run = True
+        self.padded_pair_logits = None
+        self.q_proj = None
+        self.q_bias = None
+        self.q_bias = None
+        self.k_proj = None
+        self.v_proj = None
+        self.gq = None
+
+    @profile("SelfAttention")
+    def forward(
+        self,
+        x: torch.Tensor,  # variable
+        mask: torch.Tensor,  # constant
+        pair_logits: Optional[torch.Tensor] = None,  # constant for each SelfAttention
+        single_cond: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): (num_tokens, ch)
+            mask (torch.Tensor): (num_tokens,)
+            pair_logits (torch.Tensor, optional): (num_heads, num_tokens, num_tokens)
+        """
+
+        assert (single_cond is None) == (self.use_single_cond is False)
+
+        BLK_SZ = 128 if x.shape[0] > 1536 else 64
+
+        if self.first_run:
+            self.first_run = False
+            if self.is_decoder:
+                padded_size = ((x.shape[0] + BLK_SZ - 1) // BLK_SZ) * BLK_SZ
+                self.padded_pair_logits = pad_and_align_tensor(pair_logits, (self.num_head, padded_size, padded_size))
+
+            self.q_proj = vnni_repack_tensor(self.q_projection.weight.T.contiguous(), 2, self.qkv_dim)
+            self.q_bias = self.q_projection.bias.contiguous()
+            self.k_proj = vnni_repack_tensor(self.k_projection.weight.T.contiguous(), 2, self.qkv_dim)
+            self.v_proj = vnni_repack_tensor(self.v_projection.weight.T.contiguous(), 2, self.qkv_dim)
+            self.gq = vnni_repack_tensor(self.gating_query.weight.T.contiguous(), 2, self.qkv_dim)
+
+        if not self.is_decoder:
+            self.padded_pair_logits = pair_logits
+
+        x = self.adaptive_layernorm(x, single_cond)
+
+        weighted_avg = self_attention_cpp(
+            x,
+            mask,
+            self.padded_pair_logits,
+            self.q_proj,
+            self.q_bias,
+            self.k_proj,
+            self.v_proj,
+            self.gq,
+            self.num_head,
+            False,
+            BLK_SZ,
+            0,
+        )
+
+        return self.adaptive_zero_init(weighted_avg, single_cond)
+
+
+if fastnn_config.self_attention_implementation == "cpp":
+    SelfAttention = SelfAttentionCpp
+else:
+    SelfAttention = SelfAttentionTorch
 
 
 class DiffusionTransformer(nn.Module):
