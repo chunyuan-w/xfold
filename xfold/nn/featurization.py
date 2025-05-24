@@ -21,11 +21,10 @@ from af3_kernels.tools import profile
 
 
 @profile()
-def gumbel_noise(
+def gumbel_noise(  # NOTE: remove generator to fixate the seed
     shape: Sequence[int],
     device: torch.device,
     eps=1e-6,
-    generator=None,
 ) -> torch.Tensor:
     """Generate Gumbel Noise of given Shape.
 
@@ -38,7 +37,7 @@ def gumbel_noise(
         Gumbel noise of given shape.
     """
     uniform_noise = torch.rand(
-        shape, dtype=torch.float32, device=device, generator=generator
+        shape, dtype=torch.bfloat16, device=device # use the global generator to make it deterministic
     )
     gumbel = -torch.log(-torch.log(uniform_noise + eps) + eps)
     return gumbel
@@ -47,7 +46,6 @@ def gumbel_noise(
 @profile()
 def gumbel_argsort_sample_idx(
     logits: torch.Tensor,
-    generator: Optional[torch.Generator] = None
 ) -> torch.Tensor:
     """Samples with replacement from a distribution given by 'logits'.
 
@@ -64,7 +62,7 @@ def gumbel_argsort_sample_idx(
     Returns:
       Sample from logprobs in one-hot form.
     """
-    z = gumbel_noise(logits.shape, device=logits.device, generator=generator)
+    z = gumbel_noise(logits.shape, device=logits.device)
     return torch.argsort(logits + z, dim=-1, descending=True)
 
 
