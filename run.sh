@@ -30,7 +30,7 @@ time numactl -N 0 python -m torch.backends.xeon.run_cpu --ninstances 1 --ncores-
     --db_dir=/data \
     --jackhmmer_n_cpu=${NCORES} \
     --nhmmer_n_cpu=${NCORES} \
-    --run_data_pipeline=True \
+    --run_data_pipeline=False \
     --run_inference=True \
     --json_path=${JSON_PATH}/${INPUT_NAME} \
     --model_dir=${MODEL_DIR} \
