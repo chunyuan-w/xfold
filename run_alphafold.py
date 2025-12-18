@@ -311,11 +311,16 @@ class ModelRunner:
         # TODO: save featurised_example and load for debug?
         # torch.save(featurised_example, "featurised_example.pt")
         if DO_PROFILE:
+            # record_shapes = True
+            record_shapes = False
             from torch.profiler import profile, ProfilerActivity
 
-            with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+            with profile(activities=[ProfilerActivity.CPU], record_shapes=record_shapes) as prof:
                 result = self._model(featurised_example)
-            prof.export_chrome_trace(f"{PROFILE_FILENAME}-{rank}.json")
+           
+            print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+
+            # prof.export_chrome_trace(f"{PROFILE_FILENAME}-{rank}.json")
             print("profiling done")
         else:
             result = self._model(featurised_example)
