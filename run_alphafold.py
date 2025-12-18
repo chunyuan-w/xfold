@@ -52,7 +52,7 @@ import numpy as np
 import torch
 import torch.utils._pytree as pytree
 import torch.distributed as dist
-import intel_extension_for_pytorch  # For Intel Ops
+#import intel_extension_for_pytorch  # For Intel Ops
 import oneccl_bindings_for_pytorch  # For oneCCL backend
 
 from af3_kernels import reset_debug_timers, print_debug_timers
@@ -142,7 +142,7 @@ _MODEL_DIR = flags.DEFINE_string(
 # Control which stages to run.
 _RUN_DATA_PIPELINE = flags.DEFINE_bool(
     'run_data_pipeline',
-    True,
+    False,
     'Whether to run the data pipeline on the fold inputs.',
 )
 _RUN_INFERENCE = flags.DEFINE_bool(
