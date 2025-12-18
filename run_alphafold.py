@@ -286,24 +286,30 @@ class ModelRunner:
         self, featurised_example: features.BatchDict
     ) -> base_model.ModelResult:
         """Computes a forward pass of the model on a featurised example."""
-        featurised_example = pytree.tree_map(
-            torch.from_numpy, utils.remove_invalidly_typed_feats(
-                featurised_example)
-        )
-        featurised_example = pytree.tree_map_only(
-            torch.Tensor,
-            lambda x: x.to(device=self._device),
-            featurised_example,
-        )
-        featurised_example['deletion_mean'] = featurised_example['deletion_mean'].to(
-            dtype=torch.float32)
+        if _RUN_DATA_PIPELINE.value:
+            featurised_example = pytree.tree_map(
+                torch.from_numpy, utils.remove_invalidly_typed_feats(
+                    featurised_example)
+            )
+            featurised_example = pytree.tree_map_only(
+                torch.Tensor,
+                lambda x: x.to(device=self._device),
+                featurised_example,
+            )
+            featurised_example['deletion_mean'] = featurised_example['deletion_mean'].to(
+                dtype=torch.float32)
 
-        featurised_example = {
-            k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v for k, v in featurised_example.items()
-        }
+            featurised_example = {
+                k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v for k, v in featurised_example.items()
+            }
+        else:
+            featurised_example = torch.load("featurised_example.pt")
         self._model.to(dtype=torch.bfloat16)
 
         reset_debug_timers()
+
+        # TODO: save featurised_example and load for debug?
+        # torch.save(featurised_example, "featurised_example.pt")
         if DO_PROFILE:
             from torch.profiler import profile, ProfilerActivity
 
@@ -372,9 +378,13 @@ def predict_structure(
     print(f'Featurising data for seeds {fold_input.rng_seeds}...')
     featurisation_start_time = time.time()
     ccd = chemical_components.cached_ccd(user_ccd=fold_input.user_ccd)
-    featurised_examples = featurisation.featurise_input(
-        fold_input=fold_input, buckets=buckets, ccd=ccd, verbose=True
-    )
+    if _RUN_DATA_PIPELINE.value:
+        featurised_examples = featurisation.featurise_input(
+            fold_input=fold_input, buckets=buckets, ccd=ccd, verbose=True
+        )
+    else:
+        featurised_examples = [fold_input]
+    
     print(
         f'Featurising data for seeds {fold_input.rng_seeds} took '
         f' {time.time() - featurisation_start_time:.2f} seconds.'
@@ -407,6 +417,10 @@ def predict_structure(
         print(
             f'Extracting output structures (one per sample) for seed {seed}...')
         extract_structures = time.time()
+        
+        if not _RUN_DATA_PIPELINE.value:
+            assert False, "unsupported example here if _RUN_DATA_PIPELINE is False"
+        
         inference_results = model_runner.extract_structures(
             batch=example, result=result, target_name=fold_input.name
         )
