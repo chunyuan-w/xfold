@@ -173,3 +173,5 @@ torch_compile_debug/
 
 # Keep out local env.sh
 scripts/env.sh 
+
+featurised_example.pt
