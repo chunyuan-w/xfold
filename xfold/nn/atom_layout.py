@@ -10,6 +10,7 @@
 
 
 import dataclasses
+import math
 from typing import Any
 from collections.abc import Sequence
 
@@ -105,32 +106,37 @@ def convert(
 
     # we force the input_shape to be on the CPU
     assert gather_info.input_shape.device == torch.device("cpu")
-    gather_info_input_shape = gather_info.input_shape.numpy()
+    
+    # TODO: this does not work with torch.compile
+    # gather_info_input_shape = gather_info.input_shape.numpy()
 
-    # Ensure that the layout shape is compatible
-    # with the gather_info. I.e. the first axis size must be equal or greater
-    # than the gather_info.input_shape, and all subsequent axes sizes must match.
-    if (len(layout_shape) != gather_info_input_shape.size) or (
-        isinstance(gather_info_input_shape, torch.Tensor)
-        and (
-            (layout_shape[0] < gather_info_input_shape[0])
-            or (np.any(layout_shape[1:] != gather_info_input_shape[1:]))
-        )
-    ):
-        raise ValueError(
-            'Input array layout axes are incompatible. You specified layout '
-            f'axes {layout_axes} with an input array of shape {arr.shape}, but '
-            f'the gather info expects shape {gather_info.input_shape}. '
-            'Your first axis size must be equal or greater than the '
-            'gather_info.input_shape, and all subsequent axes sizes must '
-            'match.'
-        )
+    # # Ensure that the layout shape is compatible
+    # # with the gather_info. I.e. the first axis size must be equal or greater
+    # # than the gather_info.input_shape, and all subsequent axes sizes must match.
+    # if (len(layout_shape) != gather_info_input_shape.size) or (
+    #     isinstance(gather_info_input_shape, torch.Tensor)
+    #     and (
+    #         (layout_shape[0] < gather_info_input_shape[0])
+    #         or (np.any(layout_shape[1:] != gather_info_input_shape[1:]))
+    #     )
+    # ):
+    #     raise ValueError(
+    #         'Input array layout axes are incompatible. You specified layout '
+    #         f'axes {layout_axes} with an input array of shape {arr.shape}, but '
+    #         f'the gather info expects shape {gather_info.input_shape}. '
+    #         'Your first axis size must be equal or greater than the '
+    #         'gather_info.input_shape, and all subsequent axes sizes must '
+    #         'match.'
+    #     )
 
     # Compute the shape of the input array with flattened layout.
     batch_shape = arr.shape[:layout_axes_begin]
     features_shape = arr.shape[layout_axes_end:]
+    
+    # TODO: this np.prod is causing torch.compile failure
     arr_flattened_shape = batch_shape + \
-        (np.prod(layout_shape),) + features_shape
+        (math.prod(layout_shape),) + features_shape
+        # (np.prod(layout_shape),) + features_shape
 
     # Flatten input array and perform the gather.
     arr_flattened = arr.reshape(arr_flattened_shape)
