@@ -199,7 +199,8 @@ class Evoformer(nn.Module):
         msa_activations += self.extra_msa_target_feat(target_feat)[None]
 
         # Evoformer MSA stack.
-        for msa_block in tqdm(self.msa_stack, desc="MSA stack"):
+        # for msa_block in tqdm(self.msa_stack, desc="MSA stack"):
+        for msa_block in self.msa_stack:
             msa_activations, pair_activations = msa_block(
                 msa=msa_activations,
                 pair=pair_activations,
@@ -248,7 +249,8 @@ class Evoformer(nn.Module):
         single_activations += self.prev_single_embedding(
             self.prev_single_embedding_layer_norm(prev['single']))
 
-        for pairformer_b in tqdm(self.trunk_pairformer, desc=f"Pairformer {idx}"):
+        # for pairformer_b in tqdm(self.trunk_pairformer, desc=f"Pairformer {idx}"):
+        for pairformer_b in self.trunk_pairformer:
             pair_activations, single_activations = pairformer_b(
                 pair_activations, pair_mask, single_activations, batch.token_features.mask)
 
