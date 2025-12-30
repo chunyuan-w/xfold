@@ -32,6 +32,7 @@ time numactl -N 0 python -m torch.backends.xeon.run_cpu --ninstances 1 --ncores-
     --nhmmer_n_cpu=${NCORES} \
     --run_data_pipeline=False \
     --run_inference=True \
+    --fastnn=False \
     --json_path=${JSON_PATH}/${INPUT_NAME} \
     --model_dir=${MODEL_DIR} \
     --output_dir=${OUTPUT_DIR} 2>&1 \
