@@ -391,9 +391,9 @@ class AlphaFold3(nn.Module):
             'target_feat': target_feat,  # type: ignore
         }
 
-        t1 = time.time()
+        # t1 = time.time()
         rk = dist.get_rank() if USE_DIST else 0
-        logger.info(f"rank {rk}: Start running Evoformer")
+        # logger.info(f"rank {rk}: Start running Evoformer")
         for i in range(self.num_recycles):
             embeddings = self.evoformer(
                 batch=batch,
@@ -401,14 +401,14 @@ class AlphaFold3(nn.Module):
                 target_feat=target_feat,
                 idx=i,
             )
-            print_comm_time()
+            # print_comm_time()
 
-        t2 = time.time()
-        logger.info(f"Time taken for Evoformer: {t2 - t1:.4f}s")
+        # t2 = time.time()
+        # logger.info(f"Time taken for Evoformer: {t2 - t1:.4f}s")
         samples = self._sample_diffusion(batch, embeddings)
-        t3 = time.time()
-        logger.info(f"Time taken for Diffusion: {t3 - t2:.4f}s")
-        print_comm_time()
+        # t3 = time.time()
+        # logger.info(f"Time taken for Diffusion: {t3 - t2:.4f}s")
+        # print_comm_time()
 
         confidence_output_per_sample = []
         for sample_dense_atom_position in tqdm(samples['atom_positions'], desc="Confidence"):
@@ -425,15 +425,15 @@ class AlphaFold3(nn.Module):
             confidence_output[key] = torch.stack(
                 [sample[key] for sample in confidence_output_per_sample], dim=0)
 
-        t4 = time.time()
-        logger.info(f"Time taken for Confidence: {t4 - t3:.4f}s")
+        # t4 = time.time()
+        # logger.info(f"Time taken for Confidence: {t4 - t3:.4f}s")
 
         if rk != 0:
-            logger.info(f"Skip distogram head for rank {rk}")
+            # logger.info(f"Skip distogram head for rank {rk}")
             return None
 
         distogram = self.distogram_head(batch, embeddings)
-        logger.info(f"Time taken for Distogram: {time.time() - t4:.4f}s")
+        # logger.info(f"Time taken for Distogram: {time.time() - t4:.4f}s")
 
         return {
             'diffusion_samples': samples,
