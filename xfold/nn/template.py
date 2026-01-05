@@ -149,7 +149,8 @@ class TemplateEmbedding(nn.Module):
         summed_template_embeddings = query_embedding.new_zeros(
             num_res, num_res, self.num_channels)
 
-        for template_idx in trange(num_templates, desc="Temp Embed"):
+        # for template_idx in trange(num_templates, desc="Temp Embed"):
+        for template_idx in range(num_templates):
             template_embedding = self.single_template_embedding(
                 query_embedding, templates[template_idx], padding_mask_2d, multichain_mask_2d
             )
