@@ -54,6 +54,7 @@ import torch.utils._pytree as pytree
 import torch.distributed as dist
 #import intel_extension_for_pytorch  # For Intel Ops
 import oneccl_bindings_for_pytorch  # For oneCCL backend
+import torch._inductor.config as inductor_config
 
 from af3_kernels import reset_debug_timers, print_debug_timers
 from af3_kernels.tools import DO_PROFILE, USE_DIST
@@ -307,6 +308,17 @@ class ModelRunner:
         self._model.to(dtype=torch.bfloat16)
 
         reset_debug_timers()
+
+        self._model.eval()
+        # TODO: check the perf of enabling concat linear
+        # inductor_config.cpp.enable_concat_linear = True
+        # self._model = torch.compile(self._model)
+        self._model.evoformer = torch.compile(self._model.evoformer)
+        warmup = 2
+        for i in range(warmup):
+            print(f"warmup iter: {i}")
+            result = self._model(featurised_example)
+        print("done warmup")        
 
         # TODO: save featurised_example and load for debug?
         # torch.save(featurised_example, "featurised_example.pt")
