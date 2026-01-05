@@ -76,10 +76,17 @@ class Vec3Array:
                 epsilon**2, dtype=norm2.dtype, device=norm2.device))
         return torch.sqrt(norm2)
 
-    def normalized(self, epsilon: float = 1e-6) -> Self:
-        """Return unit vector with optional clipping."""
-        return self / self.norm(epsilon)
-
+    # rewrite normalized to fix graph break
+    # def normalized(self, epsilon: float = 1e-6) -> Self:
+    #     """Return unit vector with optional clipping."""
+    #     return self / self.norm(epsilon)
+    def normalized(self, epsilon: float = 1e-6) -> "Vec3Array":
+        n = self.norm(epsilon)
+        return Vec3Array(
+            self.x / n,
+            self.y / n,
+            self.z / n,
+        )
 
 @dataclasses.dataclass
 class Rot3Array:
@@ -129,7 +136,16 @@ class Rot3Array:
         e0 = e0.normalized()
         # make e1 perpendicular to e0.
         c = e1.dot(e0)
-        e1 = (e1 - c * e0).normalized()
+        
+        # rewrite e1 computation to fix graph break
+        # e1 = (e1 - c * e0).normalized()
+        
+        x = e1.x - c * e0.x
+        y = e1.y - c * e0.y
+        z = e1.z - c * e0.z
+        norm = torch.sqrt(x * x + y * y + z * z)
+        e1 = Vec3Array(x / norm, y / norm, z / norm)        
+        
         # Compute e2 as cross product of e0 and e1.
         e2 = e0.cross(e1)
         # pytype: disable=wrong-arg-count  # trace-all-classes
@@ -146,7 +162,14 @@ class Rigid3Array:
     def inverse(self) -> Self:
         """Return Rigid3Array corresponding to inverse transform."""
         inv_rotation = self.rotation.inverse()
-        inv_translation = inv_rotation.apply_to_point(-self.translation)
+        # inv_translation = inv_rotation.apply_to_point(-self.translation)
+        # rewrite inv_translation computation to fix graph break
+        neg_translation = Vec3Array(
+            -self.translation.x,
+            -self.translation.y,
+            -self.translation.z
+        )
+        inv_translation = inv_rotation.apply_to_point(neg_translation)        
         return Rigid3Array(inv_rotation, inv_translation)
 
     def apply_to_point(self, point: Vec3Array) -> Vec3Array:
