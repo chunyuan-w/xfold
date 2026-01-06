@@ -129,11 +129,14 @@ def convert(
     # Compute the shape of the input array with flattened layout.
     batch_shape = arr.shape[:layout_axes_begin]
     features_shape = arr.shape[layout_axes_end:]
-    arr_flattened_shape = batch_shape + \
-        (np.prod(layout_shape),) + features_shape
+    
+    # fix graph breaks: data dependent operator: aten._local_scalar_dense.default
+    # arr_flattened_shape = batch_shape + \
+    #     (np.prod(layout_shape),) + features_shape
 
-    # Flatten input array and perform the gather.
-    arr_flattened = arr.reshape(arr_flattened_shape)
+    # # Flatten input array and perform the gather.
+    # arr_flattened = arr.reshape(arr_flattened_shape)
+    arr_flattened = arr.reshape(*batch_shape, -1, *features_shape)
     if layout_axes_begin == 0:
         out_arr = arr_flattened[gather_info.gather_idxs, ...]
     elif layout_axes_begin == 1:
