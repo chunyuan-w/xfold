@@ -314,6 +314,7 @@ class ModelRunner:
         # inductor_config.cpp.enable_concat_linear = True
         # self._model = torch.compile(self._model)
         self._model.evoformer = torch.compile(self._model.evoformer)
+        self._model.diffusion_head = torch.compile(self._model.diffusion_head)
         warmup = 2
         for i in range(warmup):
             print(f"warmup iter: {i}")
