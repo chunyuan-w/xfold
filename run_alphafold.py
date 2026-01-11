@@ -307,25 +307,6 @@ class ModelRunner:
         self._model.to(dtype=torch.bfloat16)
 
         reset_debug_timers()
-        
-        # print("dump model")
-        # print(self._model)
-        
-        # TODD: add torch.compile
-        self._model.eval()
-        
-        # TODO: several issues in evoformer_conditioning: numpy, self.pair_act missing because of self.first_run
-        # self._model = torch.compile(self._model)
-        
-        # self._model.evoformer = torch.compile(self._model.evoformer)
-        # self._model.diffusion_head = torch.compile(self._model.diffusion_head)
-        # warmup
-        warmup = 2
-        for i in range(warmup):
-            print(f"warmup iter: {i}")
-            result = self._model(featurised_example)
-        measure = 2
-        print("done warmup")
 
         # TODO: save featurised_example and load for debug?
         # torch.save(featurised_example, "featurised_example.pt")
@@ -342,12 +323,7 @@ class ModelRunner:
             # prof.export_chrome_trace(f"{PROFILE_FILENAME}-{rank}.json")
             print("profiling done")
         else:
-            start = time.time()
-            for i in range(measure):
-                result = self._model(featurised_example)
-            bench_time = (time.time() - start) / measure
-            print(f"AlphaFold3 forward: {bench_time:.4f}s")
-            
+            result = self._model(featurised_example)
         print_debug_timers()
 
         if rank != 0:
