@@ -257,6 +257,7 @@ _NUM_DIFFUSION_SAMPLES = flags.DEFINE_integer(
     'Number of diffusion samples to generate.',
 )
 
+input_file_name = None
 
 class ModelRunner:
     """Helper class to run structure prediction stages."""
@@ -303,16 +304,20 @@ class ModelRunner:
                 k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v for k, v in featurised_example.items()
             }
         else:
-            featurised_example = torch.load("featurised_example.pt")
+            assert input_file_name is not None
+            print(f"my loading .pt: featurised_example_{input_file_name}.pt")
+            featurised_example = torch.load(f"featurised_example_{input_file_name}.pt")
         self._model.to(dtype=torch.bfloat16)
 
         reset_debug_timers()
 
         # TODO: save featurised_example and load for debug?
-        # torch.save(featurised_example, "featurised_example.pt")
+        assert input_file_name is not None
+        print(f"my saving .pt: featurised_example_{input_file_name}.pt")
+        torch.save(featurised_example, f"featurised_example_{input_file_name}.pt")
         if DO_PROFILE:
-            # record_shapes = True
-            record_shapes = False
+            record_shapes = True
+            # record_shapes = False
             from torch.profiler import profile, ProfilerActivity
 
             with profile(activities=[ProfilerActivity.CPU], record_shapes=record_shapes) as prof:
@@ -625,6 +630,9 @@ def main(_):
             pathlib.Path(_INPUT_DIR.value)
         )
     elif _JSON_PATH.value is not None:
+        global input_file_name
+        input_file_name = _JSON_PATH.value.split("/")[-1].split(".")[0]
+        print(f"my json path: {input_file_name}")
         fold_inputs = folding_input.load_fold_inputs_from_path(
             pathlib.Path(_JSON_PATH.value)
         )
