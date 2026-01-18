@@ -15,7 +15,25 @@ RANK=0
 MODEL_DIR=/data/params
 JSON_PATH=/workspace/inputs
 #/workspace/outputs/Protein-DNA-Ion_PDB_7RCE
-INPUT_NAME=7rce.json
+
+# INPUT_NAME=amp_81.txt
+
+# INPUT_NAME=igm_237x8.txt
+
+# TODO: Jackhmmer failed
+# INPUT_NAME=titin_34350.txt
+
+# TODO: seems hang, test again
+INPUT_NAME=rydr_5038.txt
+
+# INPUT_NAME=piezo2_2752.txt
+# INPUT_NAME=reelin_3469.txt
+# INPUT_NAME=lrp2_4655.txt
+# INPUT_NAME=lcl_6077.txt
+
+
+
+# INPUT_NAME=7rce.json
 #Protein-DNA-Ion_PDB_7RCE_data.json
 OUTPUT_DIR=/workspace/outputs
 LOG_DIR=/workspace/results/log
@@ -30,7 +48,7 @@ time numactl -N 0 python -m torch.backends.xeon.run_cpu --ninstances 1 --ncores-
     --db_dir=/data \
     --jackhmmer_n_cpu=${NCORES} \
     --nhmmer_n_cpu=${NCORES} \
-    --run_data_pipeline=False \
+    --run_data_pipeline=True \
     --run_inference=True \
     --json_path=${JSON_PATH}/${INPUT_NAME} \
     --model_dir=${MODEL_DIR} \
