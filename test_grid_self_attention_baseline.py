@@ -69,35 +69,46 @@ torch.manual_seed(1234)
 
 #     return out
 
-def dot_product_attention_sdpa(q: torch.Tensor,
-                                k: torch.Tensor,
-                                v: torch.Tensor,
-                                mask: Optional[torch.Tensor] = None,
-                                bias: Optional[torch.Tensor] = None):
+def dot_product_attention_sdpa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+):
     attn_mask = None
 
+    # Handle mask (key padding mask)
     if mask is not None:
-        # Convert to SDPA format (True = masked)
         if mask.dim() == 1:
+            # (K,) -> (1,1,1,K)
             mask = mask[None, None, None, :]
         elif mask.dim() == 2:
+            # (B,K) -> (B,1,1,K)
             mask = mask[:, None, None, :]
-        attn_mask = ~mask.bool()   # SDPA expects True = mask-out
 
+        mask = mask.to(dtype=torch.bool)
+        attn_mask = mask  # bool mask
+
+    # Handle bias (additive attention bias)
     if bias is not None:
-        # SDPA supports additive bias as attn_mask (float)
         if attn_mask is None:
             attn_mask = bias
         else:
-            attn_mask = attn_mask + bias
+            # merge bool mask + additive bias
+            # masked positions → -inf
+            # TODO: -inf or -1e9
+            # attn_mask = bias.masked_fill(~attn_mask, float("-inf"))
+            attn_mask = bias.masked_fill(~attn_mask, -1e9)
 
     return F.scaled_dot_product_attention(
-        q, k, v,
+        q,
+        k,
+        v,
         attn_mask=attn_mask,
         dropout_p=0.0,
-        is_causal=False
+        is_causal=False,
     )
-
 
 def dot_product_attention_torch(q: torch.Tensor,
                                 k: torch.Tensor,
@@ -156,10 +167,10 @@ class GridSelfAttentionTorch(nn.Module):
         
         # breakpoint()
 
-        # sdpa_func = dot_product_attention_torch if small_ops else dot_product_attention_sdpa
+        sdpa_func = dot_product_attention_torch if small_ops else dot_product_attention_sdpa
         # sdpa_func = dot_product_attention_torch
         # sdpa_func = dot_product_attention_sdpa
-        weighted_avg = dot_product_attention_sdpa(q, k, v,
+        weighted_avg = sdpa_func(q, k, v,
                                                     mask=mask,
                                                     bias=bias)
 
@@ -170,7 +181,7 @@ class GridSelfAttentionTorch(nn.Module):
         weighted_avg *= torch.sigmoid(gate_values)
         return self.output_projection(weighted_avg)
 
-    def forward(self, pair, mask, small_ops=True):
+    def forward(self, pair, mask, small_ops=False):
         """
         Args:
             pair (torch.Tensor): [N_token, N_token, c_pair]
@@ -203,32 +214,40 @@ class GridSelfAttentionTorch(nn.Module):
 m = GridSelfAttentionTorch().to(torch.bfloat16)
 m.eval()
 
-warmup = 5
-measure = 5
+# TODO: change according to shape
+warmup = 20
+measure = 50
 print("done model creation")
 # N_token = 384
 # N_token = 5120
 
 # N_token = 1024
-N_token = 384
+# N_token = 384
+# original_N_token = 256
+
+N_token = 2048
+original_N_token = 1896
 
 c_pair = 128
 pair = torch.randn(N_token, N_token, c_pair, dtype=torch.bfloat16)
-mask = torch.randn(N_token, N_token, dtype=torch.bfloat16)
+
+mask = torch.zeros(N_token, N_token, dtype=torch.bfloat16)
+mask[:original_N_token, :original_N_token] = 1
 print("done tensor creation")
 
 with torch.no_grad():
 
-    # y_small_ops = m(pair, mask)
-    y_fused_sdpa = m(pair, mask, small_ops=False)
+    y_small_ops = m(pair, mask, small_ops = True)
+    y_fused_sdpa = m(pair, mask)
 
-    # print(y_small_ops[358][339][67])
-    # print(y_fused_sdpa[358][339][67])
+    print(y_small_ops[256][0][6])
+    print(y_fused_sdpa[256][0][6])
     
     # print(y_small_ops[21][234][36])
     # print(y_fused_sdpa[21][234][36])
-    # torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
 
+    torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
+    
     if torch_compile:
         m = torch.compile(m)
     
