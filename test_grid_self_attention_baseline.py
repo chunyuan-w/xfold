@@ -1,3 +1,4 @@
+import argparse
 import einops
 import time
 from typing import Optional
@@ -10,10 +11,7 @@ from torch._inductor import config as inductor_config
 inductor_config.profiler_mark_wrapper_call = True
 inductor_config.cpp.enable_kernel_profile = True
 
-torch_compile = True
-
 torch.manual_seed(1234)
-
 
 # flash_attn_varlen_func = torch.ops.sgl_kernel.flash_attn_varlen_func  # your kernel
 
@@ -204,75 +202,82 @@ class GridSelfAttentionTorch(nn.Module):
 
         return pair
 
+def main(use_torch, torch_compile):
+    # TODO: test transpose=True
+    if use_torch:
+        m = GridSelfAttentionTorch()
+    else:
+        import xfold
+        from af3_kernels import GridSelfAttentionCpp
+        m = GridSelfAttentionCpp()
+
+    # TODO: add correctness check
+
+    m = m.to(torch.bfloat16)
+    m.eval()
+    print("done model creation")
+
+    c_pair = 128
+
+    # N_token = 384
+    # N_token = 5120
+    # N_token = 1024
+
+    # N_token = 384
+    # original_N_token = 256
+
+    N_token = 2048
+    original_N_token = 1896
+
+    # TODO: change according to shape
+    warmup = 20 if N_token <= 1024 else 10
+    measure = 50 if N_token <= 1024 else 20
+
+    pair = torch.randn(N_token, N_token, c_pair, dtype=torch.bfloat16)
+
+    mask = torch.zeros(N_token, N_token, dtype=torch.bfloat16)
+    mask[:original_N_token, :original_N_token] = 1
+    print("done tensor creation")
+
+    with torch.no_grad():
+        if use_torch:
+            y_small_ops = m(pair, mask, small_ops = True)
+            y_fused_sdpa = m(pair, mask)
+
+            # print(y_small_ops[256][0][6])
+            # print(y_fused_sdpa[256][0][6])
+        
+            torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
+        
+        if torch_compile:
+            m = torch.compile(m)
+        
+        for _ in range(warmup):
+            y = m(pair, mask)
+        
+        record_shapes = True
+        
+        from torch.profiler import profile, ProfilerActivity
+        with profile(activities=[ProfilerActivity.CPU], record_shapes=record_shapes) as prof:
+            y = m(pair, mask)
+        
+        print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+
+        start = time.time()
+        for _ in range(measure):
+            y = m(pair, mask)
+        
+        end = time.time()
+        
+        print(f"time used: {(end - start) / measure} s")
+
+    print("done")
 
 
-# TODO: add correctness check
-# TODO: add bench time
-
-# TODO: test transpose=True
-
-m = GridSelfAttentionTorch().to(torch.bfloat16)
-m.eval()
-
-# TODO: change according to shape
-warmup = 20
-measure = 50
-print("done model creation")
-# N_token = 384
-# N_token = 5120
-
-# N_token = 1024
-# N_token = 384
-# original_N_token = 256
-
-N_token = 2048
-original_N_token = 1896
-
-c_pair = 128
-pair = torch.randn(N_token, N_token, c_pair, dtype=torch.bfloat16)
-
-mask = torch.zeros(N_token, N_token, dtype=torch.bfloat16)
-mask[:original_N_token, :original_N_token] = 1
-print("done tensor creation")
-
-with torch.no_grad():
-
-    y_small_ops = m(pair, mask, small_ops = True)
-    y_fused_sdpa = m(pair, mask)
-
-    print(y_small_ops[256][0][6])
-    print(y_fused_sdpa[256][0][6])
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--torch', action='store_true')
+    parser.add_argument('--torch-compile', action='store_true')
+    args = parser.parse_args()
     
-    # print(y_small_ops[21][234][36])
-    # print(y_fused_sdpa[21][234][36])
-
-    torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
-    
-    if torch_compile:
-        m = torch.compile(m)
-    
-    for _ in range(warmup):
-        y = m(pair, mask)
-    
-        # y_xfold = xfold_m(pair, mask)
-    print("done 1st run")
-
-    record_shapes = True
-    
-    from torch.profiler import profile, ProfilerActivity
-    with profile(activities=[ProfilerActivity.CPU], record_shapes=record_shapes) as prof:
-        y = m(pair, mask)
-        # y_xfold = xfold_m(pair, mask)
-    
-    print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
-
-    start = time.time()
-    for _ in range(measure):
-        y = m(pair, mask)
-    
-        # y_xfold = xfold_m(pair, mask)        
-    end = time.time()
-    
-    print(f"time used: {(end - start) / measure} s")
-
-print("done")
+    main(args.torch, args.torch_compile)
