@@ -13,59 +13,55 @@ inductor_config.cpp.enable_kernel_profile = True
 
 torch.manual_seed(1234)
 
-# flash_attn_varlen_func = torch.ops.sgl_kernel.flash_attn_varlen_func  # your kernel
 
-# def dot_product_attention_flash(q: torch.Tensor,
-#                                 k: torch.Tensor,
-#                                 v: torch.Tensor,
-#                                 mask: Optional[torch.Tensor] = None,
-#                                 bias: Optional[torch.Tensor] = None):
-#     """
-#     q, k, v: [B, H, N, D]
-#     mask: [B, 1, 1, N] or [B, 1, N, N]
-#     bias: broadcastable additive bias
-#     """
+def dot_product_attention_sglang(q: torch.Tensor,
+                                k: torch.Tensor,
+                                v: torch.Tensor,
+                                mask: Optional[torch.Tensor] = None,
+                                bias: Optional[torch.Tensor] = None):
+    """
+    q, k, v: [B, H, N, D]
+    bias: [H, N, N]
+    """
 
-#     B, H, N, D = q.shape
+    B, H, N, D = q.shape
 
-#     # ---- handle mask and bias ----
-#     if mask is not None:
-#         # convert to boolean and flatten
-#         mask = mask.bool()
-#         # TODO: SDPA had True=masked; flash_attn_varlen_func does not support mask yet?
-#         # If your kernel does not support masks, you may need to manually zero-out values or skip masking
-#         # For simplicity, we'll assume mask=None for now
+    # TODO：bias not supported in kernel
+    # if bias is not None:
+    #     # flash_attn_varlen_func currently does not support additive bias directly
+    #     # apply bias manually to v (optional)
+    #     v = v + bias.unsqueeze(-1)  # broadcast if necessary
 
-#     if bias is not None:
-#         # flash_attn_varlen_func currently does not support additive bias directly
-#         # apply bias manually to v (optional)
-#         v = v + bias.unsqueeze(-1)  # broadcast if necessary
+    # ---- flatten batch sequences ----
+    q_flat = q.transpose(1, 2).reshape(B*N, H, D)  # [T_total, H, D]
+    k_flat = k.transpose(1, 2).reshape(B*N, H, D)
+    v_flat = v.transpose(1, 2).reshape(B*N, H, D)
 
-#     # ---- flatten batch sequences ----
-#     q_flat = q.transpose(1, 2).reshape(B*N, H, D)  # [T_total, H, D]
-#     k_flat = k.transpose(1, 2).reshape(B*N, H, D)
-#     v_flat = v.transpose(1, 2).reshape(B*N, H, D)
+    # TODO: exclude this from time benchmark
+    # cumulative sequence lengths
+    cu_seqlens_q = torch.arange(0, B*N + 1, step=N, dtype=torch.int32, device=q.device)
+    cu_seqlens_k = torch.arange(0, B*N + 1, step=N, dtype=torch.int32, device=q.device)
 
-#     # cumulative sequence lengths
-#     cu_seqlens_q = torch.arange(0, B*N + 1, step=N, dtype=torch.int32, device=q.device)
-#     cu_seqlens_k = torch.arange(0, B*N + 1, step=N, dtype=torch.int32, device=q.device)
+    # For example, B = 2, N = 4, cu_seqlens_q: [0, 4, 8]
+    # BS 0: seq[0]:seq[4]
+    # BS 1: seq[4]:seq[8]
 
-#     # ---- call fused kernel ----
-#     out_flat = flash_attn_varlen_func(
-#         q_flat,
-#         k_flat,
-#         v_flat,
-#         cu_seqlens_q,
-#         cu_seqlens_k,
-#         max_seqlen_q=N,
-#         max_seqlen_k=N,
-#         is_causal=False,
-#     )
+    # ---- call fused kernel ----
+    out_flat = torch.ops.sgl_kernel.flash_attn_varlen_func(
+        q_flat,
+        k_flat,
+        v_flat,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        N,
+        N,
+        False, # is_causal
+    )
 
-#     # ---- reshape back ----
-#     out = out_flat.reshape(B, N, H, D).transpose(1, 2)  # [B, H, N, D]
+    # ---- reshape back ----
+    out = out_flat.reshape(B, N, H, D).transpose(1, 2)  # [B, H, N, D]
 
-#     return out
+    return out
 
 
 
@@ -177,8 +173,9 @@ def dot_product_attention_torch_no_mask(q: torch.Tensor,
 
     logits = torch.matmul(q, k.transpose(-1, -2))
 
-    if bias is not None:
-        logits += bias
+    # TODO: bias not supported in sglang, comment out for test for now
+    # if bias is not None:
+    #     logits += bias
 
     # if mask is not None:
     #     if mask.dim() == 1:
@@ -257,7 +254,8 @@ class GridSelfAttentionTorch(nn.Module):
                 sdpa_func = dot_product_attention_sdpa_slice
             else:
                 # sdpa_func = dot_product_attention_sdpa
-                sdpa_func = dot_product_attention_sdpa_no_mask
+                # sdpa_func = dot_product_attention_sdpa_no_mask
+                sdpa_func = dot_product_attention_sglang
         # sdpa_func = dot_product_attention_torch
         # sdpa_func = dot_product_attention_sdpa
         weighted_avg = sdpa_func(q, k, v,
@@ -298,6 +296,7 @@ def main(use_torch, torch_compile):
     # TODO: test transpose=True
     if use_torch:
         m = GridSelfAttentionTorch()
+        import sgl_kernel
     else:
         import xfold
         from af3_kernels import GridSelfAttentionCpp
