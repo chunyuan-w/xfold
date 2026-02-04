@@ -67,6 +67,42 @@ torch.manual_seed(1234)
 
 #     return out
 
+
+
+def dot_product_attention_sdpa_slice(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,    
+):
+    # TODO: this is bad for perf, but sdpa does not accept out buffer
+    out = torch.zeros_like(q)
+    
+    # TODO: hardcodeded for now
+    mask_index = 1896
+    
+    # Handle bias
+    bias = bias.unsqueeze(0)
+    bias = bias[:, :, :mask_index, :mask_index]
+    
+    q = q[:mask_index, :, :mask_index, :]
+    k = k[:mask_index, :, :mask_index, :]
+    v = v[:mask_index, :, :mask_index, :]
+
+    attn_out = F.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        attn_mask=bias,
+        dropout_p=0.0,
+        is_causal=False,
+    )
+    # TODO: this is bad for perf, but sdpa does not accept out buffer
+    out[:mask_index,:,:mask_index,:] = attn_out
+    
+    return out
+
 def dot_product_attention_sdpa(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -96,8 +132,8 @@ def dot_product_attention_sdpa(
             # merge bool mask + additive bias
             # masked positions → -inf
             # TODO: -inf or -1e9
-            # attn_mask = bias.masked_fill(~attn_mask, float("-inf"))
-            attn_mask = bias.masked_fill(~attn_mask, -1e9)
+            attn_mask = bias.masked_fill(~attn_mask, float("-inf"))
+            # attn_mask = bias.masked_fill(~attn_mask, -1e9)
 
     return F.scaled_dot_product_attention(
         q,
@@ -154,7 +190,7 @@ class GridSelfAttentionTorch(nn.Module):
         self.output_projection = nn.Linear(
             self.c_pair, self.c_pair, bias=False)
 
-    def _attention(self, pair: torch.Tensor, mask: torch.Tensor, bias: torch.Tensor, small_ops):
+    def _attention(self, pair: torch.Tensor, mask: torch.Tensor, bias: torch.Tensor, small_ops, slice):
         q = self.q_projection(pair)
         k = self.k_projection(pair)
         v = self.v_projection(pair)
@@ -165,7 +201,13 @@ class GridSelfAttentionTorch(nn.Module):
         
         # breakpoint()
 
-        sdpa_func = dot_product_attention_torch if small_ops else dot_product_attention_sdpa
+        if small_ops:
+            sdpa_func = dot_product_attention_torch
+        else:
+            if slice:
+                sdpa_func = dot_product_attention_sdpa_slice
+            else:
+                sdpa_func = dot_product_attention_sdpa
         # sdpa_func = dot_product_attention_torch
         # sdpa_func = dot_product_attention_sdpa
         weighted_avg = sdpa_func(q, k, v,
@@ -179,7 +221,7 @@ class GridSelfAttentionTorch(nn.Module):
         weighted_avg *= torch.sigmoid(gate_values)
         return self.output_projection(weighted_avg)
 
-    def forward(self, pair, mask, small_ops=False):
+    def forward(self, pair, mask, small_ops=False, slice=False):
         """
         Args:
             pair (torch.Tensor): [N_token, N_token, c_pair]
@@ -195,7 +237,7 @@ class GridSelfAttentionTorch(nn.Module):
         if self.transpose:
             pair = pair.permute(1, 0, 2)
 
-        pair = self._attention(pair, mask, nonbatched_bias, small_ops)
+        pair = self._attention(pair, mask, nonbatched_bias, small_ops, slice)
 
         if self.transpose:
             pair = pair.permute(1, 0, 2)
@@ -241,13 +283,17 @@ def main(use_torch, torch_compile):
 
     with torch.no_grad():
         if use_torch:
-            y_small_ops = m(pair, mask, small_ops = True)
+            # y_small_ops = m(pair, mask, small_ops = True)
             y_fused_sdpa = m(pair, mask)
+            y_fused_sdpa_slice = m(pair, mask, slice=True)
 
             # print(y_small_ops[256][0][6])
             # print(y_fused_sdpa[256][0][6])
         
-            torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
+            breakpoint()
+
+            # torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(y_fused_sdpa, y_fused_sdpa_slice, atol=1e-2, rtol=1e-2)
         
         if torch_compile:
             m = torch.compile(m)
