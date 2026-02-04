@@ -86,6 +86,7 @@ def dot_product_attention_sdpa_slice(
     bias = bias.unsqueeze(0)
     bias = bias[:, :, :mask_index, :mask_index]
     
+    # TODO: for batch dim (dim 0), do we need to do slice??
     q = q[:mask_index, :, :mask_index, :]
     k = k[:mask_index, :, :mask_index, :]
     v = v[:mask_index, :, :mask_index, :]
@@ -102,6 +103,26 @@ def dot_product_attention_sdpa_slice(
     out[:mask_index,:,:mask_index,:] = attn_out
     
     return out
+
+def dot_product_attention_sdpa_no_mask(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+):
+    # Handle bias (additive attention bias)
+    if bias is not None:
+        bias = bias.unsqueeze(0)
+
+    return F.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        attn_mask=bias,
+        dropout_p=0.0,
+        is_causal=False,
+    )
 
 def dot_product_attention_sdpa(
     q: torch.Tensor,
@@ -143,6 +164,33 @@ def dot_product_attention_sdpa(
         dropout_p=0.0,
         is_causal=False,
     )
+
+
+def dot_product_attention_torch_no_mask(q: torch.Tensor,
+                                k: torch.Tensor,
+                                v: torch.Tensor,
+                                mask: Optional[torch.Tensor] = None,
+                                bias: Optional[torch.Tensor] = None):
+    scaling = q.size(-1) ** -0.5
+    q = q * scaling
+    # breakpoint()
+
+    logits = torch.matmul(q, k.transpose(-1, -2))
+
+    if bias is not None:
+        logits += bias
+
+    # if mask is not None:
+    #     if mask.dim() == 1:
+    #         mask = mask[None, None, None, :].to(dtype=torch.bool)
+    #     elif mask.dim() == 2:
+    #         mask = mask[:, None, None, :].to(dtype=torch.bool)
+    #     logits.masked_fill_(~mask, -1e9)
+
+    weights = torch.softmax(logits, dim=-1)
+
+    return torch.matmul(weights, v)
+
 
 def dot_product_attention_torch(q: torch.Tensor,
                                 k: torch.Tensor,
@@ -202,12 +250,14 @@ class GridSelfAttentionTorch(nn.Module):
         # breakpoint()
 
         if small_ops:
-            sdpa_func = dot_product_attention_torch
+            # sdpa_func = dot_product_attention_torch
+            sdpa_func = dot_product_attention_torch_no_mask
         else:
             if slice:
                 sdpa_func = dot_product_attention_sdpa_slice
             else:
-                sdpa_func = dot_product_attention_sdpa
+                # sdpa_func = dot_product_attention_sdpa
+                sdpa_func = dot_product_attention_sdpa_no_mask
         # sdpa_func = dot_product_attention_torch
         # sdpa_func = dot_product_attention_sdpa
         weighted_avg = sdpa_func(q, k, v,
@@ -268,7 +318,10 @@ def main(use_torch, torch_compile):
     # N_token = 384
     # original_N_token = 256
 
-    N_token = 2048
+    # N_token = 2048
+    # original_N_token = 1896
+
+    N_token = 1896
     original_N_token = 1896
 
     # TODO: change according to shape
@@ -283,17 +336,15 @@ def main(use_torch, torch_compile):
 
     with torch.no_grad():
         if use_torch:
-            # y_small_ops = m(pair, mask, small_ops = True)
+            y_small_ops = m(pair, mask, small_ops = True)
             y_fused_sdpa = m(pair, mask)
-            y_fused_sdpa_slice = m(pair, mask, slice=True)
+            # y_fused_sdpa_slice = m(pair, mask, slice=True)
 
             # print(y_small_ops[256][0][6])
             # print(y_fused_sdpa[256][0][6])
         
-            breakpoint()
-
-            # torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
-            torch.testing.assert_close(y_fused_sdpa, y_fused_sdpa_slice, atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
+            # torch.testing.assert_close(y_fused_sdpa, y_fused_sdpa_slice, atol=1e-2, rtol=1e-2)
         
         if torch_compile:
             m = torch.compile(m)
