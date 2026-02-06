@@ -47,10 +47,14 @@ def dot_product_attention_sglang(q: torch.Tensor,
     # BS 1: seq[4]:seq[8]
 
     # ---- call fused kernel ----
+    # breakpoint()
+    # TODO: support non contiguous bias
+    bias = bias.contiguous()
     out_flat = torch.ops.sgl_kernel.flash_attn_varlen_func(
         q_flat,
         k_flat,
         v_flat,
+        bias,
         cu_seqlens_q,
         cu_seqlens_k,
         N,
@@ -174,8 +178,8 @@ def dot_product_attention_torch_no_mask(q: torch.Tensor,
     logits = torch.matmul(q, k.transpose(-1, -2))
 
     # TODO: bias not supported in sglang, comment out for test for now
-    # if bias is not None:
-    #     logits += bias
+    if bias is not None:
+        logits += bias
 
     # if mask is not None:
     #     if mask.dim() == 1:
@@ -216,7 +220,7 @@ def dot_product_attention_torch(q: torch.Tensor,
 
 
 class GridSelfAttentionTorch(nn.Module):
-    def __init__(self, c_pair: int = 128, num_head: int = 4, transpose: bool = False):
+    def __init__(self, c_pair: int = 128, num_head: int = 1, transpose: bool = False):
         super(GridSelfAttentionTorch, self).__init__()
         self.c_pair = c_pair
         self.num_head = num_head
@@ -244,6 +248,13 @@ class GridSelfAttentionTorch(nn.Module):
         q, k, v = map(lambda t: einops.rearrange(
             t, 'b n (h d) -> b h n d', h=self.num_head), [q, k, v])
         
+        # breakpoint()
+        # TODO: for debug
+        # q = torch.ones_like(q)
+        # k = torch.ones_like(k)
+        # v = torch.ones_like(v)
+        print(bias)
+        bias = torch.ones_like(bias)
         # breakpoint()
 
         if small_ops:
@@ -293,14 +304,16 @@ class GridSelfAttentionTorch(nn.Module):
         return pair
 
 def main(use_torch, torch_compile):
+    c_pair = 8
+    
     # TODO: test transpose=True
     if use_torch:
-        m = GridSelfAttentionTorch()
+        m = GridSelfAttentionTorch(c_pair=c_pair)
         import sgl_kernel
     else:
         import xfold
         from af3_kernels import GridSelfAttentionCpp
-        m = GridSelfAttentionCpp()
+        m = GridSelfAttentionCpp(c_pair=c_pair)
 
     # TODO: add correctness check
 
@@ -308,20 +321,20 @@ def main(use_torch, torch_compile):
     m.eval()
     print("done model creation")
 
-    c_pair = 128
 
     # N_token = 384
     # N_token = 5120
     # N_token = 1024
 
-    # N_token = 384
+    N_token = 2
+    original_N_token = 2
     # original_N_token = 256
 
     # N_token = 2048
     # original_N_token = 1896
 
-    N_token = 1896
-    original_N_token = 1896
+    # N_token = 1896
+    # original_N_token = 1896
 
     # TODO: change according to shape
     warmup = 20 if N_token <= 1024 else 10
@@ -341,6 +354,9 @@ def main(use_torch, torch_compile):
 
             # print(y_small_ops[256][0][6])
             # print(y_fused_sdpa[256][0][6])
+            
+            print(y_small_ops)
+            print(y_fused_sdpa)
         
             torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
             # torch.testing.assert_close(y_fused_sdpa, y_fused_sdpa_slice, atol=1e-2, rtol=1e-2)
