@@ -220,7 +220,7 @@ def dot_product_attention_torch(q: torch.Tensor,
 
 
 class GridSelfAttentionTorch(nn.Module):
-    def __init__(self, c_pair: int = 128, num_head: int = 1, transpose: bool = False):
+    def __init__(self, c_pair: int = 128, num_head: int = 4, transpose: bool = False):
         super(GridSelfAttentionTorch, self).__init__()
         self.c_pair = c_pair
         self.num_head = num_head
@@ -253,8 +253,8 @@ class GridSelfAttentionTorch(nn.Module):
         # q = torch.ones_like(q)
         # k = torch.ones_like(k)
         # v = torch.ones_like(v)
-        print(bias)
-        bias = torch.ones_like(bias)
+        # print(bias)
+        # bias = torch.zeros_like(bias)
         # breakpoint()
 
         if small_ops:
@@ -304,16 +304,17 @@ class GridSelfAttentionTorch(nn.Module):
         return pair
 
 def main(use_torch, torch_compile):
-    c_pair = 8
+    c_pair = 128
+    num_head = 4
     
     # TODO: test transpose=True
     if use_torch:
-        m = GridSelfAttentionTorch(c_pair=c_pair)
+        m = GridSelfAttentionTorch(c_pair=c_pair, num_head=num_head)
         import sgl_kernel
     else:
         import xfold
         from af3_kernels import GridSelfAttentionCpp
-        m = GridSelfAttentionCpp(c_pair=c_pair)
+        m = GridSelfAttentionCpp(c_pair=c_pair, num_head=num_head)
 
     # TODO: add correctness check
 
@@ -326,15 +327,18 @@ def main(use_torch, torch_compile):
     # N_token = 5120
     # N_token = 1024
 
-    N_token = 2
-    original_N_token = 2
+    # N_token = 8
+    # original_N_token = 8
     # original_N_token = 256
+
+    # N_token = 384
+    # original_N_token = 384
 
     # N_token = 2048
     # original_N_token = 1896
 
-    # N_token = 1896
-    # original_N_token = 1896
+    N_token = 1896
+    original_N_token = 1896
 
     # TODO: change according to shape
     warmup = 20 if N_token <= 1024 else 10
