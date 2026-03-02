@@ -79,8 +79,11 @@ def dot_product_attention_sdpa_slice(
     # TODO: this is bad for perf, but sdpa does not accept out buffer
     out = torch.zeros_like(q)
     
-    # TODO: hardcodeded for now
-    mask_index = 1896
+    # Derive valid length from mask
+    if mask is not None:
+        mask_index = int(mask.any(dim=0).sum().item())
+    else:
+        mask_index = N
     
     # Handle bias
     bias = bias.unsqueeze(0)
@@ -351,6 +354,7 @@ def main(use_torch, torch_compile):
     print("done tensor creation")
 
     with torch.no_grad():
+        # TODO: skip unfused sdpa when size is too large
         if use_torch:
             y_small_ops = m(pair, mask, small_ops = True)
             y_fused_sdpa = m(pair, mask)
@@ -359,11 +363,23 @@ def main(use_torch, torch_compile):
             # print(y_small_ops[256][0][6])
             # print(y_fused_sdpa[256][0][6])
             
-            print(y_small_ops)
-            print(y_fused_sdpa)
+            # print(y_small_ops)
+            # print(y_fused_sdpa)
         
             torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
             # torch.testing.assert_close(y_fused_sdpa, y_fused_sdpa_slice, atol=1e-2, rtol=1e-2)
+        # else:
+        #     y_tpp = m(pair, mask)
+
+        # TODO: use which func as ref for xfold kernel?
+        #     m_ref = GridSelfAttentionTorch(c_pair=c_pair, num_head=num_head).to(torch.bfloat16).eval()
+        #     y_ref = m_ref(pair, mask, small_ops = True)
+
+        #     # Mismatched elements: 1359815 / 2097152 (64.8%)
+        #     # Greatest absolute difference: 0.16796875 at index (59, 5, 83) (up to 0.01 allowed)
+        #     # Greatest relative difference: 425984.0 at index (24, 59, 27) (up to 0.01 allowed)
+                        
+        #     torch.testing.assert_close(y_ref, y_tpp, atol=1e-2, rtol=1e-2)
         
         if torch_compile:
             m = torch.compile(m)
