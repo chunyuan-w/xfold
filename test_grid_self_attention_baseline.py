@@ -335,13 +335,18 @@ def main(use_torch, torch_compile):
     # original_N_token = 256
 
     # N_token = 384
+    
+    N_token = 1896
+    # N_token = 3469
+    # N_token = 4655
+    
     # original_N_token = 384
 
     # N_token = 2048
     # original_N_token = 1896
 
-    N_token = 1896
-    original_N_token = 1896
+    # N_token = 1896
+    # original_N_token = 1896
 
     # TODO: change according to shape
     warmup = 20 if N_token <= 1024 else 10
@@ -349,13 +354,15 @@ def main(use_torch, torch_compile):
 
     pair = torch.randn(N_token, N_token, c_pair, dtype=torch.bfloat16)
 
-    mask = torch.zeros(N_token, N_token, dtype=torch.bfloat16)
-    mask[:original_N_token, :original_N_token] = 1
+    mask = torch.ones(N_token, N_token, dtype=torch.bfloat16)
+    
+    assert torch.all(mask == 1)
     print("done tensor creation")
 
     with torch.no_grad():
         # TODO: skip unfused sdpa when size is too large
         if use_torch:
+        # if False:
             y_small_ops = m(pair, mask, small_ops = True)
             y_fused_sdpa = m(pair, mask)
             # y_fused_sdpa_slice = m(pair, mask, slice=True)
