@@ -263,7 +263,7 @@ class GridSelfAttentionTorch(nn.Module):
         self.output_projection = nn.Linear(
             self.c_pair, self.c_pair, bias=False)
 
-    def _attention(self, pair: torch.Tensor, mask: torch.Tensor, bias: torch.Tensor, small_ops, slice):
+    def _attention(self, pair: torch.Tensor, mask: torch.Tensor, bias: torch.Tensor, small_ops, torch_sdpa):
         q = self.q_projection(pair)
         k = self.k_projection(pair)
         v = self.v_projection(pair)
@@ -285,8 +285,8 @@ class GridSelfAttentionTorch(nn.Module):
             # sdpa_func = dot_product_attention_torch
             sdpa_func = dot_product_attention_torch_no_mask
         else:
-            if slice:
-                sdpa_func = dot_product_attention_sdpa_slice
+            if torch_sdpa:
+                sdpa_func = dot_product_attention_sdpa_no_mask
             else:
                 # sdpa_func = dot_product_attention_sdpa
                 # sdpa_func = dot_product_attention_sdpa_no_mask
@@ -304,7 +304,7 @@ class GridSelfAttentionTorch(nn.Module):
         weighted_avg *= torch.sigmoid(gate_values)
         return self.output_projection(weighted_avg)
 
-    def forward(self, pair, mask, small_ops=False, slice=False):
+    def forward(self, pair, mask, small_ops=False, torch_sdpa=False):
         """
         Args:
             pair (torch.Tensor): [N_token, N_token, c_pair]
@@ -320,7 +320,7 @@ class GridSelfAttentionTorch(nn.Module):
         if self.transpose:
             pair = pair.permute(1, 0, 2)
 
-        pair = self._attention(pair, mask, nonbatched_bias, small_ops, slice)
+        pair = self._attention(pair, mask, nonbatched_bias, small_ops, torch_sdpa)
 
         if self.transpose:
             pair = pair.permute(1, 0, 2)
@@ -362,9 +362,9 @@ def main(use_torch, torch_compile):
 
     # N_token = 384
     
-    N_token = 1896
+    # N_token = 1896
     # N_token = 3469
-    # N_token = 4655
+    N_token = 4655
     
     # original_N_token = 384
 
@@ -386,16 +386,19 @@ def main(use_torch, torch_compile):
     print("done tensor creation")
 
     with torch.no_grad():
-        y_small_ops = m(pair, mask, small_ops = True)
+        if use_torch:
+            # TODO: use fused sdpa when size is too large
+            # y_small_ops = m(pair, mask, small_ops = True)
+            y_ref_sdpa = m(pair, mask, torch_sdpa = True)
+            # torch.testing.assert_close(y_small_ops, y_ref_sdpa, atol=1e-2, rtol=1e-2)
+            
 
         if torch_compile:
             m = torch.compile(m)
             # run once to trigger compile
             _ = m(pair, mask)       
         
-        # TODO: skip unfused sdpa when size is too large
         if use_torch:
-        # if False:
             y_fused_sdpa = m(pair, mask)
             # y_fused_sdpa_slice = m(pair, mask, slice=True)
 
@@ -404,8 +407,8 @@ def main(use_torch, torch_compile):
             
             # print(y_small_ops)
             # print(y_fused_sdpa)
-        
-            torch.testing.assert_close(y_small_ops, y_fused_sdpa, atol=1e-2, rtol=1e-2)
+
+            torch.testing.assert_close(y_ref_sdpa, y_fused_sdpa, atol=1e-2, rtol=1e-2)
             # torch.testing.assert_close(y_fused_sdpa, y_fused_sdpa_slice, atol=1e-2, rtol=1e-2)
         # else:
         #     y_tpp = m(pair, mask)
