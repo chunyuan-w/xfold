@@ -16,7 +16,6 @@ if [ "$1" == "torch" ]; then
         ARGS="$ARGS --torch-compile"
         echo "### running torch compile"
     else
-        ARGS=""
         echo "### running eager"
     fi
 
