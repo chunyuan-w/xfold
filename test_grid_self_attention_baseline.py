@@ -10,8 +10,29 @@ from torch._inductor import config as inductor_config
 
 inductor_config.profiler_mark_wrapper_call = True
 inductor_config.cpp.enable_kernel_profile = True
+inductor_config.cpp_wrapper = True
 
 torch.manual_seed(1234)
+
+
+def register_fake_ops():
+    @torch.library.register_fake("sgl_kernel::flash_attn_varlen_func")
+    def _(
+        q,
+        k,
+        v,
+        bias,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        causal,
+    ):
+        num_tokens = q.shape[0]
+        num_heads = q.shape[1]
+        head_size_v = v.shape[2]
+        
+        return torch.empty(num_tokens, num_heads, head_size_v, device=q.device, dtype=q.dtype)
 
 
 def dot_product_attention_sglang(q: torch.Tensor,
@@ -314,6 +335,11 @@ def main(use_torch, torch_compile):
     if use_torch:
         m = GridSelfAttentionTorch(c_pair=c_pair, num_head=num_head)
         import sgl_kernel
+        
+        # TODO: if we import from sglang, no need to register here but need to register in sglang
+        if torch_compile:
+            register_fake_ops()
+            
     else:
         import xfold
         from af3_kernels import GridSelfAttentionCpp
@@ -360,10 +386,16 @@ def main(use_torch, torch_compile):
     print("done tensor creation")
 
     with torch.no_grad():
+        y_small_ops = m(pair, mask, small_ops = True)
+
+        if torch_compile:
+            m = torch.compile(m)
+            # run once to trigger compile
+            _ = m(pair, mask)       
+        
         # TODO: skip unfused sdpa when size is too large
         if use_torch:
         # if False:
-            y_small_ops = m(pair, mask, small_ops = True)
             y_fused_sdpa = m(pair, mask)
             # y_fused_sdpa_slice = m(pair, mask, slice=True)
 
@@ -387,9 +419,6 @@ def main(use_torch, torch_compile):
         #     # Greatest relative difference: 425984.0 at index (24, 59, 27) (up to 0.01 allowed)
                         
         #     torch.testing.assert_close(y_ref, y_tpp, atol=1e-2, rtol=1e-2)
-        
-        if torch_compile:
-            m = torch.compile(m)
         
         for _ in range(warmup):
             y = m(pair, mask)
