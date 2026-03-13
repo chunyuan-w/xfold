@@ -75,7 +75,7 @@ def dot_product_attention_sglang(q: torch.Tensor,
         q_flat,
         k_flat,
         v_flat,
-        bias,
+        bias, # comment out to test no bias case
         cu_seqlens_q,
         cu_seqlens_k,
         N,
@@ -143,7 +143,7 @@ def dot_product_attention_sdpa_no_mask(
         q,
         k,
         v,
-        attn_mask=bias,
+        attn_mask=bias, # comment out to test no bias case
         dropout_p=0.0,
         is_causal=False,
     )
@@ -320,6 +320,8 @@ class GridSelfAttentionTorch(nn.Module):
         if self.transpose:
             pair = pair.permute(1, 0, 2)
 
+        # nonbatched_bias = torch.zeros_like(nonbatched_bias)
+
         pair = self._attention(pair, mask, nonbatched_bias, small_ops, torch_sdpa)
 
         if self.transpose:
@@ -341,7 +343,7 @@ def main(use_torch, torch_compile):
             register_fake_ops()
             
     else:
-        import xfold
+        # import xfold
         from af3_kernels import GridSelfAttentionCpp
         m = GridSelfAttentionCpp(c_pair=c_pair, num_head=num_head)
 
