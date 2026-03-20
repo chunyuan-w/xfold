@@ -1,4 +1,5 @@
 import argparse
+import copy
 import einops
 import time
 from typing import Optional
@@ -10,7 +11,9 @@ from torch._inductor import config as inductor_config
 
 inductor_config.profiler_mark_wrapper_call = True
 inductor_config.cpp.enable_kernel_profile = True
-inductor_config.cpp_wrapper = True
+# TODO: after using weight_packed_linear, cpp wrapper will fail but python wrapper works
+# inductor_config.cpp_wrapper = True
+# inductor_config.max_autotune = True
 
 torch.manual_seed(1234)
 
@@ -33,6 +36,15 @@ def register_fake_ops():
         head_size_v = v.shape[2]
         
         return torch.empty(num_tokens, num_heads, head_size_v, device=q.device, dtype=q.dtype)
+
+    @torch.library.register_fake("sgl_kernel::weight_packed_linear")
+    def _(x, weight, bias, is_vnni):
+        # TODO: in upstream, the below one is used, but seems wrong when x.dim > 2. weight dim should be weight.shape[1] if weight is the prepacked one
+        # return x.new_empty(x.shape[0], weight.shape[0])
+        out_shape = x.shape[:-1] + (weight.shape[1],)
+        print(f"fake: x shape = {x.shape}, w shape = {weight.shape}, out shape = {out_shape}", )
+
+        return x.new_empty(out_shape)
 
 
 def dot_product_attention_sglang(q: torch.Tensor,
@@ -329,27 +341,129 @@ class GridSelfAttentionTorch(nn.Module):
 
         return pair
 
+
+class LinearSGL(nn.Module):
+    def __init__(self, m):
+        super(LinearSGL, self).__init__()
+        if hasattr(m, "bias") and m.bias is not None:
+            self.bias = torch.nn.Parameter(m.bias.data.float(), requires_grad=False)
+        
+        weight = m.weight.data
+        
+        # pack weight
+        import sgl_kernel
+        
+        packed_weight = torch.nn.Parameter(
+            torch.ops.sgl_kernel.convert_weight_packed(weight),
+            requires_grad=False,
+        )
+        # packed_weight.__dict__ = weight.__dict__
+        self.weight = packed_weight
+
+    def forward(self, x):
+        x_shapes = x.shape
+        if len(x_shapes) == 3:
+            x = x.view(-1, x.shape[-1])        
+        output = torch.ops.sgl_kernel.weight_packed_linear(
+            x,
+            self.weight,
+            self.bias if hasattr(self, "bias") else None,
+            True,  # is_vnni
+        )
+        if len(x_shapes) == 3:
+            output = output.view(x_shapes[0], x_shapes[1], -1)
+        return output
+
+class GridSelfAttentionSGL(nn.Module):
+    def __init__(self, m):
+        super(GridSelfAttentionSGL, self).__init__()
+        self.c_pair = m.c_pair
+        self.num_head = m.num_head
+        self.qkv_dim = self.c_pair // self.num_head
+        self.transpose = m.transpose
+
+        self.act_norm = copy.deepcopy(m.act_norm)
+        self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
+
+        self.q_projection = LinearSGL(m.q_projection)
+        self.k_projection = LinearSGL(m.k_projection)
+        self.v_projection = LinearSGL(m.v_projection)
+
+        self.gating_query = LinearSGL(m.gating_query)
+        self.output_projection = LinearSGL(m.output_projection)
+
+    def _attention(self, pair: torch.Tensor, mask: torch.Tensor, bias: torch.Tensor, small_ops, torch_sdpa):
+        q = self.q_projection(pair)
+        k = self.k_projection(pair)
+        v = self.v_projection(pair)
+
+        # breakpoint()
+        q, k, v = map(lambda t: einops.rearrange(
+            t, 'b n (h d) -> b h n d', h=self.num_head), [q, k, v])
+        
+        sdpa_func = dot_product_attention_sglang
+        weighted_avg = sdpa_func(q, k, v,
+                                                    mask=mask,
+                                                    bias=bias)
+
+        weighted_avg = einops.rearrange(weighted_avg, 'b h n d -> b n (h d)')
+
+        gate_values = self.gating_query(pair)
+
+        weighted_avg *= torch.sigmoid(gate_values)
+        return self.output_projection(weighted_avg)
+
+    def forward(self, pair, mask, small_ops=False, torch_sdpa=False):
+        """
+        Args:
+            pair (torch.Tensor): [N_token, N_token, c_pair]
+            mask (torch.Tensor): [N_token, N_token]
+        Returns:
+            torch.Tensor: [N_token, N_token, c_pair]
+        """
+
+        pair = self.act_norm(pair)
+        # breakpoint()
+        nonbatched_bias = self.pair_bias_projection(pair).permute(2, 0, 1)
+        # breakpoint()
+        if self.transpose:
+            pair = pair.permute(1, 0, 2)
+
+        # nonbatched_bias = torch.zeros_like(nonbatched_bias)
+
+        pair = self._attention(pair, mask, nonbatched_bias, small_ops, torch_sdpa)
+
+        if self.transpose:
+            pair = pair.permute(1, 0, 2)
+
+        return pair
+
+
 def main(use_torch, torch_compile):
     c_pair = 128
     num_head = 4
     
     # TODO: test transpose=True
     if use_torch:
-        m = GridSelfAttentionTorch(c_pair=c_pair, num_head=num_head)
         import sgl_kernel
         
         # TODO: if we import from sglang, no need to register here but need to register in sglang
         if torch_compile:
             register_fake_ops()
+        
+        m_ref = GridSelfAttentionTorch(c_pair=c_pair, num_head=num_head)
+        m_ref = m_ref.to(torch.bfloat16)
+        m_ref.eval()
+        
+        m = GridSelfAttentionSGL(m_ref)
             
     else:
         # import xfold
         from af3_kernels import GridSelfAttentionCpp
         m = GridSelfAttentionCpp(c_pair=c_pair, num_head=num_head)
+        m = m.to(torch.bfloat16)
 
     # TODO: add correctness check
-
-    m = m.to(torch.bfloat16)
     m.eval()
     print("done model creation")
 
@@ -391,7 +505,7 @@ def main(use_torch, torch_compile):
         if use_torch:
             # TODO: use fused sdpa when size is too large
             # y_small_ops = m(pair, mask, small_ops = True)
-            y_ref_sdpa = m(pair, mask, torch_sdpa = True)
+            y_ref_sdpa = m_ref(pair, mask, torch_sdpa = True)
             # torch.testing.assert_close(y_small_ops, y_ref_sdpa, atol=1e-2, rtol=1e-2)
             
 
