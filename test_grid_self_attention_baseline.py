@@ -408,9 +408,26 @@ class GridSelfAttentionSGL(nn.Module):
 
         weighted_avg = einops.rearrange(weighted_avg, 'b h n d -> b n (h d)')
 
-        gate_values = self.gating_query(pair)
-
-        weighted_avg *= torch.sigmoid(gate_values)
+        # TODO: wrap view into a module
+        x_shapes = pair.shape
+        if len(x_shapes) == 3:
+            pair = pair.view(-1, pair.shape[-1])
+        mul_shapes = weighted_avg.shape
+        if len(mul_shapes) == 3:
+            weighted_avg = weighted_avg.view(-1, pair.shape[-1])
+        weighted_avg = torch.ops.sgl_kernel.weight_packed_linear_sigmoid_mul(
+            pair,
+            self.gating_query.weight,
+            self.gating_query.bias if hasattr(self.gating_query, "bias") else None,
+            weighted_avg,
+            True,  # inplace
+            True,  # is_vnni
+        )
+        if len(x_shapes) == 3:
+            weighted_avg = weighted_avg.view(x_shapes[0], x_shapes[1], -1)
+        # gate_values = self.gating_query(pair)
+        
+        # weighted_avg *= torch.sigmoid(gate_values)
         return self.output_projection(weighted_avg)
 
     def forward(self, pair, mask, small_ops=False, torch_sdpa=False):
