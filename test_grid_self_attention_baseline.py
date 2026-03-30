@@ -385,17 +385,34 @@ class GridSelfAttentionSGL(nn.Module):
         self.act_norm = copy.deepcopy(m.act_norm)
         self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
 
-        self.q_projection = LinearSGL(m.q_projection)
-        self.k_projection = LinearSGL(m.k_projection)
-        self.v_projection = LinearSGL(m.v_projection)
+        # concat the weight of q_projection, k_projection and v_projection
+        # TODO: add check: in_features and out_features all equal; no bias for all of them
+        qkv_projection = nn.Linear(m.q_projection.in_features, m.q_projection.out_features * 3, bias=m.q_projection.bias)
+        concat_weight = torch.nn.Parameter(
+            torch.cat([
+                m.q_projection.weight,
+                m.k_projection.weight,
+                m.v_projection.weight
+            ], dim=0),
+            requires_grad=False,          
+        )
+        qkv_projection.weight = concat_weight
+        self.qkv_projection = LinearSGL(qkv_projection)
+        
+        # self.q_projection = LinearSGL(m.q_projection)
+        # self.k_projection = LinearSGL(m.k_projection)
+        # self.v_projection = LinearSGL(m.v_projection)
 
         self.gating_query = LinearSGL(m.gating_query)
         self.output_projection = LinearSGL(m.output_projection)
 
     def _attention(self, pair: torch.Tensor, mask: torch.Tensor, bias: torch.Tensor, small_ops, torch_sdpa):
-        q = self.q_projection(pair)
-        k = self.k_projection(pair)
-        v = self.v_projection(pair)
+        # q = self.q_projection(pair)
+        # k = self.k_projection(pair)
+        # v = self.v_projection(pair)
+        
+        qkv = self.qkv_projection(pair)
+        q, k, v = torch.chunk(qkv, 3, dim=-1)
 
         # breakpoint()
         q, k, v = map(lambda t: einops.rearrange(
