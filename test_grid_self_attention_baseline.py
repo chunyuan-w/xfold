@@ -342,6 +342,30 @@ class GridSelfAttentionTorch(nn.Module):
         return pair
 
 
+class LayerNormSGL(nn.Module):
+    def __init__(self, m):
+        super(LayerNormSGL, self).__init__()
+        
+        weight = torch.nn.Parameter(
+            m.weight.data,
+            requires_grad=False,
+        )
+        self.weight = weight
+        self.variance_epsilon = m.eps
+
+    def forward(self, x):
+        x_shapes = x.shape
+        if len(x_shapes) == 3:
+            x = x.view(-1, x.shape[-1])             
+        # the output is directly written into x
+        torch.ops.sgl_kernel.layernorm_cpu(
+            x, self.weight.data, self.variance_epsilon
+        )
+        if len(x_shapes) == 3:
+            x = x.view(x_shapes[0], x_shapes[1], -1)
+        return x        
+
+
 class LinearSGL(nn.Module):
     def __init__(self, m):
         super(LinearSGL, self).__init__()
@@ -382,7 +406,8 @@ class GridSelfAttentionSGL(nn.Module):
         self.qkv_dim = self.c_pair // self.num_head
         self.transpose = m.transpose
 
-        self.act_norm = copy.deepcopy(m.act_norm)
+        # self.act_norm = copy.deepcopy(m.act_norm)
+        self.act_norm = LayerNormSGL(m.act_norm)
         self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
 
         # concat the weight of q_projection, k_projection and v_projection
