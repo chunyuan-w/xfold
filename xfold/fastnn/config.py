@@ -3,7 +3,7 @@
 from af3_kernels.tools import USE_DIST
 
 # options: ["torch", "triton", "ipex"]
-layer_norm_implementation = "ipex"
+layer_norm_implementation = "torch"
 
 # options: ["torch", "triton", "cpp"]
 dot_product_attention_implementation = "cpp"

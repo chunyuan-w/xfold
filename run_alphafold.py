@@ -52,8 +52,8 @@ import numpy as np
 import torch
 import torch.utils._pytree as pytree
 import torch.distributed as dist
-import intel_extension_for_pytorch  # For Intel Ops
-import oneccl_bindings_for_pytorch  # For oneCCL backend
+# import intel_extension_for_pytorch  # For Intel Ops (disabled for PyTorch 2.11 test)
+# import oneccl_bindings_for_pytorch  # For oneCCL backend (disabled for single-node test)
 
 from af3_kernels import reset_debug_timers, print_debug_timers
 from af3_kernels.tools import DO_PROFILE, USE_DIST

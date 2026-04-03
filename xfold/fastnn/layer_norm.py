@@ -15,7 +15,10 @@ from xfold.fastnn import config as fastnn_config
 
 from af3_kernels.tools import profile
 
-import intel_extension_for_pytorch as ipex
+try:
+    import intel_extension_for_pytorch as ipex
+except ImportError:
+    ipex = None
 
 _shape_t = Union[int, List[int], Size]
 
@@ -146,8 +149,12 @@ class LayerNorm(nn.Module):
 
     @profile("LayerNorm")
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if fastnn_config.layer_norm_implementation == "ipex":
+        if fastnn_config.layer_norm_implementation == "ipex" and ipex is not None:
             return ipex.llm.functional.fast_layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
+        elif fastnn_config.layer_norm_implementation == "ipex" and ipex is None:
+            return F.layer_norm(
+                input, self.normalized_shape, self.weight, self.bias, self.eps
+            )
         elif fastnn_config.layer_norm_implementation == "torch":
             return F.layer_norm(
                 input, self.normalized_shape, self.weight, self.bias, self.eps
