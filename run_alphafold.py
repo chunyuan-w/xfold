@@ -280,11 +280,6 @@ class ModelRunner:
         self._model.eval()
         print('loading the model parameters...')
         import_jax_weights_(self._model, model_dir)
-        
-        # Pack SGL weights for efficient inference if using SGL backend
-        print('packing SGL weights...')
-        pack_sgl_weights(self._model)
-
         self._model = self._model.to(device=self._device)
 
         if _USE_FASTNN.value is False:
@@ -313,14 +308,26 @@ class ModelRunner:
             k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v for k, v in featurised_example.items()
         }
         self._model.to(dtype=torch.bfloat16)
+        print('packing SGL weights...')
+        pack_sgl_weights(self._model)
+
+        print('=== Featurised tensor shapes ===')
+        for key in sorted(featurised_example):
+            value = featurised_example[key]
+            if isinstance(value, torch.Tensor):
+                print(f'{key}: shape={tuple(value.shape)}, dtype={value.dtype}')
+        print('================================')
 
         reset_debug_timers()
         if DO_PROFILE:
             from torch.profiler import profile, ProfilerActivity
+            
+            record_shapes = True
 
             with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
                 result = self._model(featurised_example)
-            prof.export_chrome_trace(f"{PROFILE_FILENAME}-{rank}.json")
+            print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total", row_limit=-1))
+            # prof.export_chrome_trace(f"{PROFILE_FILENAME}-{rank}.json")
             print("profiling done")
         else:
             result = self._model(featurised_example)
