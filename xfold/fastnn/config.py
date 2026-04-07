@@ -1,5 +1,7 @@
 # Copyright 2025 Xflops
 
+import os
+
 from af3_kernels.tools import USE_DIST
 
 # options: ["torch", "triton", "ipex"]
@@ -11,8 +13,10 @@ dot_product_attention_implementation = "cpp"
 # options: ["torch", "triton", "cpp"]
 gated_linear_unit_implementation = "cpp"
 
-# options: ["torch", ""cpp"]
-grid_self_attention_implementation = "cpp"
+# options: ["torch", "cpp", "sgl"]
+grid_self_attention_implementation = os.environ.get(
+	"AF3_GRID_SELF_ATTENTION_IMPL", "cpp"
+)
 
 # options: ["torch", ""cpp"]
 self_attention_implementation = "cpp"

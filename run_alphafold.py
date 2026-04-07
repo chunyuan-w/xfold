@@ -61,6 +61,7 @@ from af3_kernels.tools import DO_PROFILE, USE_DIST
 from xfold.alphafold3 import AlphaFold3
 from xfold.params import import_jax_weights_
 from xfold.fastnn import config as fastnn_config
+from xfold.nn.attention import pack_sgl_weights
 
 _BUCKETS: tuple[int, ...] = (
     64,
@@ -149,6 +150,12 @@ _RUN_INFERENCE = flags.DEFINE_bool(
     'run_inference',
     True,
     'Whether to run inference on the fold inputs.',
+)
+_PAD_TO_BUCKETS = flags.DEFINE_bool(
+    'pad_to_buckets',
+    True,
+    'Whether to pad features to the predefined bucket sizes. If false, use '
+    'the exact token length instead of bucket padding.',
 )
 
 _USE_FASTNN = flags.DEFINE_bool(
@@ -273,6 +280,10 @@ class ModelRunner:
         self._model.eval()
         print('loading the model parameters...')
         import_jax_weights_(self._model, model_dir)
+        
+        # Pack SGL weights for efficient inference if using SGL backend
+        print('packing SGL weights...')
+        pack_sgl_weights(self._model)
 
         self._model = self._model.to(device=self._device)
 
@@ -546,8 +557,25 @@ def process_fold_input(
     if not fold_input.chains:
         raise ValueError('Fold input has no chains.')
 
+    def _has_unset_pipeline_fields(inp: folding_input.Input) -> bool:
+        for chain in inp.protein_chains:
+            if chain.unpaired_msa is None or chain.paired_msa is None or chain.templates is None:
+                return True
+        for chain in inp.rna_chains:
+            if chain.unpaired_msa is None:
+                return True
+        return False
+
     if data_pipeline_config is None:
         print('Skipping data pipeline...')
+        if _has_unset_pipeline_fields(fold_input):
+            raise ValueError(
+                'run_data_pipeline=False requires a preprocessed input JSON '
+                'that already contains MSA/template fields. The provided input '
+                'still has unset pipeline fields (e.g. null unpairedMsa, '
+                'pairedMsa, or templates). Run once with run_data_pipeline=True '
+                'and reuse the generated *_data.json.'
+            )
     else:
         print('Running data pipeline...')
         fold_input = pipeline.DataPipeline(
@@ -680,6 +708,12 @@ def main(_):
         model_runner = None
 
     print(f'Processing {len(fold_inputs)} fold inputs.')
+    buckets = _BUCKETS if _PAD_TO_BUCKETS.value else None
+    print(
+        'Bucket padding '
+        f'{"enabled" if _PAD_TO_BUCKETS.value else "disabled"}. '
+        f'Using buckets={buckets if buckets is not None else "exact token length"}.'
+    )
     for fold_input in fold_inputs:
         process_fold_input(
             fold_input=fold_input,
@@ -687,7 +721,7 @@ def main(_):
             model_runner=model_runner,
             output_dir=os.path.join(
                 _OUTPUT_DIR.value, fold_input.sanitised_name()),
-            buckets=_BUCKETS,
+            buckets=buckets,
         )
     if USE_DIST:
         torch.distributed.barrier()
