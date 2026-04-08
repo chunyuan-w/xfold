@@ -141,21 +141,31 @@ class LayerNormSGL(torch.nn.LayerNorm):
 
     def __init__(self, normalized_shape, eps=1e-05, elementwise_affine=True, bias=True, device=None, dtype=None):
         super(LayerNormSGL, self).__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype)
-        # TODO: bias is unsupported. Add bias check
+        # TODO: bias is unsupported.
 
     def forward(self, x):
-        x_shapes = x.shape
-        # TODO: reshape introduces extra memory copy here
-        # x is from previous TPP triangle multiplication kernel and has been padded. The size is [81,81,64] but stride is [81*128, 64, 1]
-        # directly view on this tensor will fail.
-        if len(x_shapes) == 3:
-            x = x.reshape(-1, x.shape[-1])
-        torch.ops.sgl_kernel.layernorm_cpu(
-            x, self.weight, self.eps
+        return torch.nn.functional.layer_norm(
+            x,
+            self.normalized_shape,
+            self.weight,
+            self.bias,
+            self.eps,
         )
-        if len(x_shapes) == 3:
-            x = x.view(x_shapes[0], x_shapes[1], -1)
-        return x
+
+
+        # TODO: bias is unsupported in torch.ops.sgl_kernel.layernorm_cpu
+        # x_shapes = x.shape
+        # # TODO: reshape introduces extra memory copy here
+        # # x is from previous TPP triangle multiplication kernel and has been padded. The size is [81,81,64] but stride is [81*128, 64, 1]
+        # # directly view on this tensor will fail.
+        # if len(x_shapes) == 3:
+        #     x = x.reshape(-1, x.shape[-1])
+        # torch.ops.sgl_kernel.layernorm_cpu(
+        #     x, self.weight, self.eps
+        # )
+        # if len(x_shapes) == 3:
+        #     x = x.view(x_shapes[0], x_shapes[1], -1)
+        # return x        
 
 
 class LinearSGL(torch.nn.Linear):
