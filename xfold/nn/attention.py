@@ -145,8 +145,11 @@ class LayerNormSGL(torch.nn.LayerNorm):
 
     def forward(self, x):
         x_shapes = x.shape
+        # TODO: reshape introduces extra memory copy here
+        # x is from previous TPP triangle multiplication kernel and has been padded. The size is [81,81,64] but stride is [81*128, 64, 1]
+        # directly view on this tensor will fail.
         if len(x_shapes) == 3:
-            x = x.view(-1, x.shape[-1])      
+            x = x.reshape(-1, x.shape[-1])
         torch.ops.sgl_kernel.layernorm_cpu(
             x, self.weight, self.eps
         )
@@ -173,8 +176,11 @@ class LinearSGL(torch.nn.Linear):
 
     def forward(self, x):
         x_shapes = x.shape
+        # TODO: reshape introduces extra memory copy here
+        # x is from previous TPP triangle multiplication kernel and has been padded. The size is [81,81,64] but stride is [81*128, 64, 1]
+        # directly view on this tensor will fail.        
         if len(x_shapes) == 3:
-            x = x.view(-1, x.shape[-1])
+            x = x.reshape(-1, x.shape[-1])
         output = torch.ops.sgl_kernel.weight_packed_linear(
             x,
             self.weight,  # Use packed weight directly
