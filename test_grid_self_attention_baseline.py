@@ -366,25 +366,6 @@ class LayerNormSGL(nn.Module):
         return x        
 
 
-def check_layernorm_bias_parity(c_pair: int = 128):
-    """Validate SGL layernorm matches torch layernorm when bias is non-zero."""
-    ln_ref = nn.LayerNorm(c_pair).to(torch.bfloat16).eval()
-    with torch.no_grad():
-        # Keep nontrivial affine parameters so we test both scale and bias paths.
-        ln_ref.weight.copy_(1.0 + 0.1 * torch.randn_like(ln_ref.weight))
-        ln_ref.bias.copy_(0.2 + 0.1 * torch.randn_like(ln_ref.bias))
-
-    ln_sgl = LayerNormSGL(ln_ref).to(torch.bfloat16).eval()
-    x = torch.randn(31, 37, c_pair, dtype=torch.bfloat16)
-
-    with torch.no_grad():
-        y_ref = ln_ref(x)
-        y_sgl = ln_sgl(x.clone())
-
-    torch.testing.assert_close(y_ref, y_sgl, atol=1e-2, rtol=1e-2)
-    print("LayerNorm bias parity check passed.")
-
-
 class LinearSGL(nn.Module):
     def __init__(self, m):
         super(LinearSGL, self).__init__()
@@ -517,14 +498,9 @@ class GridSelfAttentionSGL(nn.Module):
         return pair
 
 
-def main(use_torch, torch_compile, check_ln_bias):
+def main(use_torch, torch_compile):
     c_pair = 128
     num_head = 4
-
-    if check_ln_bias:
-        import sgl_kernel  # noqa: F401
-        check_layernorm_bias_parity(c_pair=c_pair)
-        return
     
     # TODO: test transpose=True
     if use_torch:
@@ -537,6 +513,10 @@ def main(use_torch, torch_compile, check_ln_bias):
         m_ref = GridSelfAttentionTorch(c_pair=c_pair, num_head=num_head)
         m_ref = m_ref.to(torch.bfloat16)
         m_ref.eval()
+        with torch.no_grad():
+            # Keep LayerNorm affine params non-trivial in the baseline UT path.
+            m_ref.act_norm.weight.copy_(1.0 + 0.1 * torch.randn_like(m_ref.act_norm.weight))
+            m_ref.act_norm.bias.copy_(0.2 + 0.1 * torch.randn_like(m_ref.act_norm.bias))
         
         m = GridSelfAttentionSGL(m_ref)
             
@@ -648,9 +628,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--torch', action='store_true')
     parser.add_argument('--torch-compile', action='store_true')
-    parser.add_argument('--check-ln-bias', dest='check_ln_bias', action='store_true')
-    parser.add_argument('--no-check-ln-bias', dest='check_ln_bias', action='store_false')
-    parser.set_defaults(check_ln_bias=True)
     args = parser.parse_args()
     
-    main(args.torch, args.torch_compile, args.check_ln_bias)
+    main(args.torch, args.torch_compile)
