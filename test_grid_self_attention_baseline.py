@@ -406,8 +406,9 @@ class GridSelfAttentionSGL(nn.Module):
         self.qkv_dim = self.c_pair // self.num_head
         self.transpose = m.transpose
 
-        # self.act_norm = copy.deepcopy(m.act_norm)
-        self.act_norm = LayerNormSGL(m.act_norm)
+        # TODO: LayerNormSGL does not support bias
+        self.act_norm = copy.deepcopy(m.act_norm)
+        # self.act_norm = LayerNormSGL(m.act_norm)
         self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
 
         # concat the weight of q_projection, k_projection and v_projection
