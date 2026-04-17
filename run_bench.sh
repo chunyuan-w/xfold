@@ -26,6 +26,9 @@ if [ "$1" == "torch" ]; then
     elif [ "$2" == "fused" ]; then
         ARGS="$ARGS --fused"
         echo "### running fused sgl kernel (single QKV+attn+gate+out_proj op)"
+    elif [ "$2" == "fused2" ]; then
+        ARGS="$ARGS --fused2"
+        echo "### running fused sgl kernel v2 (QKVG concat + fused attn-tail + out_proj)"
     else
         echo "### running eager"
     fi

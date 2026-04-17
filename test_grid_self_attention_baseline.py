@@ -52,6 +52,11 @@ def register_fake_ops():
         out_shape = pair.shape[:-1] + (o_w.shape[1],)
         return pair.new_empty(out_shape)
 
+    @torch.library.register_fake("sgl_kernel::fused_grid_attention_v2")
+    def _(pair, bias, qkvg_w, o_w, num_heads, is_vnni):
+        out_shape = pair.shape[:-1] + (o_w.shape[1],)
+        return pair.new_empty(out_shape)
+
 
 def dot_product_attention_sglang(q: torch.Tensor,
                                 k: torch.Tensor,
@@ -557,7 +562,62 @@ class GridSelfAttentionFusedSGL(nn.Module):
         return out
 
 
-def main(use_torch, torch_compile, use_fused):
+class GridSelfAttentionFusedSGLv2(nn.Module):
+    """A+B split: one QKVG concat GEMM + fused attention-tail + out_proj."""
+
+    def __init__(self, m):
+        super().__init__()
+        self.c_pair = m.c_pair
+        self.num_head = m.num_head
+        self.qkv_dim = self.c_pair // self.num_head
+        self.transpose = m.transpose
+
+        self.act_norm = copy.deepcopy(m.act_norm)
+        self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
+
+        import sgl_kernel  # ensure the op library is loaded
+
+        # Build one concat weight [4*D, D] = cat(Q | K | V | G) and pack it so
+        # stage A reads pair once per projection-group.
+        qkvg_weight_unpacked = torch.cat(
+            [
+                m.q_projection.weight.data,
+                m.k_projection.weight.data,
+                m.v_projection.weight.data,
+                m.gating_query.weight.data,
+            ],
+            dim=0,
+        )
+        self.qkvg_weight = torch.nn.Parameter(
+            torch.ops.sgl_kernel.convert_weight_packed(qkvg_weight_unpacked),
+            requires_grad=False,
+        )
+        self.output_weight = torch.nn.Parameter(
+            torch.ops.sgl_kernel.convert_weight_packed(m.output_projection.weight.data),
+            requires_grad=False,
+        )
+
+    def forward(self, pair, mask, small_ops=False, torch_sdpa=False):
+        pair = self.act_norm(pair)
+        bias = self.pair_bias_projection(pair).permute(2, 0, 1).contiguous()
+        if self.transpose:
+            pair = pair.permute(1, 0, 2).contiguous()
+
+        out = torch.ops.sgl_kernel.fused_grid_attention_v2(
+            pair,
+            bias,
+            self.qkvg_weight,
+            self.output_weight,
+            self.num_head,
+            True,  # is_vnni
+        )
+
+        if self.transpose:
+            out = out.permute(1, 0, 2)
+        return out
+
+
+def main(use_torch, torch_compile, use_fused, use_fused2):
     c_pair = 128
     num_head = 4
 
@@ -577,7 +637,9 @@ def main(use_torch, torch_compile, use_fused):
             m_ref.act_norm.weight.copy_(1.0 + 0.1 * torch.randn_like(m_ref.act_norm.weight))
             m_ref.act_norm.bias.copy_(0.2 + 0.1 * torch.randn_like(m_ref.act_norm.bias))
 
-        if use_fused:
+        if use_fused2:
+            m = GridSelfAttentionFusedSGLv2(m_ref)
+        elif use_fused:
             m = GridSelfAttentionFusedSGL(m_ref)
         else:
             m = GridSelfAttentionSGL(m_ref)
@@ -692,6 +754,8 @@ if __name__ == "__main__":
     parser.add_argument('--torch-compile', action='store_true')
     parser.add_argument('--fused', action='store_true',
                         help='use the single fused CPU kernel (QKV + flash attn + gate + output proj)')
+    parser.add_argument('--fused2', action='store_true',
+                        help='A+B split: concat QKVG GEMM + fused attn-tail + out_proj')
     args = parser.parse_args()
 
-    main(args.torch, args.torch_compile, args.fused)
+    main(args.torch, args.torch_compile, args.fused, args.fused2)
