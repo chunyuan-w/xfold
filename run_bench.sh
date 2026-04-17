@@ -23,6 +23,9 @@ if [ "$1" == "torch" ]; then
     if [ "$2" == "compile" ]; then
         ARGS="$ARGS --torch-compile"
         echo "### running torch compile"
+    elif [ "$2" == "fused" ]; then
+        ARGS="$ARGS --fused"
+        echo "### running fused sgl kernel (single QKV+attn+gate+out_proj op)"
     else
         echo "### running eager"
     fi
@@ -32,6 +35,14 @@ else
     echo "### running xfold kernel"
 fi
 
-numactl --physcpubind=0-71 --membind=0 python -u test_grid_self_attention_baseline.py $ARGS
+# Bind to the physical cores of NUMA node 0 (drop hyperthread siblings so each
+# OpenMP thread gets its own core). Derived automatically from lscpu so this
+# script works across machines with different NUMA / SMT layouts.
+NUMA_NODE=${NUMA_NODE:-0}
+PHYS_CORES=$(lscpu -p=CPU,Core,Node | awk -F, -v n=$NUMA_NODE \
+    '!/^#/ && $3==n { if (!seen[$2]++) printf("%s%s", sep, $1); sep="," }')
+echo "### binding to NUMA node $NUMA_NODE physical cores: $PHYS_CORES"
 
-# numactl --physcpubind=0-71 --membind=0 python -u test_grid_self_attention.py
+numactl --physcpubind=$PHYS_CORES --membind=$NUMA_NODE python -u test_grid_self_attention_baseline.py $ARGS
+
+# numactl --physcpubind=$PHYS_CORES --membind=$NUMA_NODE python -u test_grid_self_attention.py
