@@ -32,6 +32,9 @@ if [ "$1" == "torch" ]; then
     elif [ "$2" == "fused3" ]; then
         ARGS="$ARGS --fused3"
         echo "### running fused sgl kernel v3 (per-head tiled proj + full-logit attn core)"
+    elif [ "$2" == "fused4" ]; then
+        ARGS="$ARGS --fused4"
+        echo "### running fused sgl kernel v4 (B-tiled qkvg scratch, L3-sized)"
     else
         echo "### running eager"
     fi
