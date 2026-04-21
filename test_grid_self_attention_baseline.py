@@ -794,13 +794,20 @@ def main(use_torch, torch_compile, use_fused, use_fused2, use_fused3):
         
         print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
 
-        start = time.time()
-        for _ in range(measure):
+        run_times = []
+        for run_idx in range(measure):
+            start = time.perf_counter()
             y = m(pair, mask)
-        
-        end = time.time()
-        
-        print(f"time used: {(end - start) / measure} s")
+            end = time.perf_counter()
+            run_times.append(end - start)
+
+        mean_time = sum(run_times) / len(run_times)
+        print("per-run times (s):")
+        print(", ".join(f"{run_idx + 1}:{run_time:.6f}" for run_idx, run_time in enumerate(run_times)))
+        print(
+            "time summary (s): "
+            f"avg={mean_time:.6f}, min={min(run_times):.6f}, max={max(run_times):.6f}"
+        )
 
     print("done")
 
