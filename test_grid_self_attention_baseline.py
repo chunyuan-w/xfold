@@ -377,6 +377,10 @@ class LayerNormSGL(nn.Module):
             requires_grad=False,
         )
         self.weight = weight
+        if hasattr(m, "bias") and m.bias is not None:
+            self.bias = torch.nn.Parameter(m.bias.data, requires_grad=False)
+        else:
+            self.bias = None
         self.variance_epsilon = m.eps
 
     def forward(self, x):
@@ -385,7 +389,7 @@ class LayerNormSGL(nn.Module):
             x = x.view(-1, x.shape[-1])             
         # the output is directly written into x
         torch.ops.sgl_kernel.layernorm_cpu(
-            x, self.weight.data, self.variance_epsilon
+            x, self.weight.data, self.bias, self.variance_epsilon
         )
         if len(x_shapes) == 3:
             x = x.view(x_shapes[0], x_shapes[1], -1)
@@ -433,8 +437,8 @@ class GridSelfAttentionSGL(nn.Module):
         self.transpose = m.transpose
 
         # TODO: LayerNormSGL does not support bias
-        self.act_norm = copy.deepcopy(m.act_norm)
-        # self.act_norm = LayerNormSGL(m.act_norm)
+        # self.act_norm = copy.deepcopy(m.act_norm)
+        self.act_norm = LayerNormSGL(m.act_norm)
         self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
 
         # concat the weight of q_projection, k_projection and v_projection
