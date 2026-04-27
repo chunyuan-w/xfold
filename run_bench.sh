@@ -1,6 +1,6 @@
 # For torch kernel
 # conda activate chunyuan
-# TORCH_LOGS="+inductor,+output_code"  TORCHINDUCTOR_FREEZING=1  ./run_bench.sh torch compile 2>&1 | tee ../chunyuan_profile/op_bench_2048_torch_0203.log
+# TORCH_LOGS="+inductor,+output_code"  TORCHINDUCTOR_FREEZING=1  ./run_bench.sh torch fused2 2>&1 | tee ../chunyuan_profile/op_bench_2048_torch_0203.log
 
 # For xfold kernel, in docker:
 # ./run_bench.sh 2>&1 | tee ../chunyuan_profile/op_bench_2048_xfold_0203.log
