@@ -32,9 +32,16 @@ def pack_sgl_weights(module: nn.Module):
     MUST call this after loading model weights. This replaces unpacked weights with packed
     weights in-place, enabling efficient kernel execution without runtime weight transformation.
     
+    Order: concat fused weights first (on unpacked data), then pack everything.
+    
     Args:
         module: The model or submodule to pack weights for.
     """
+    # First pass: concat unpacked weights into fused weights (e.g. qkvg_weight).
+    for submodule in module.modules():
+        if hasattr(submodule, 'concat_qkvg_weights') and callable(submodule.concat_qkvg_weights):
+            submodule.concat_qkvg_weights()
+    # Second pass: pack all LinearSGL weights (including the newly created fused ones).
     for submodule in module.modules():
         if hasattr(submodule, 'pack_weight') and callable(submodule.pack_weight):
             submodule.pack_weight()
@@ -141,31 +148,21 @@ class LayerNormSGL(torch.nn.LayerNorm):
 
     def __init__(self, normalized_shape, eps=1e-05, elementwise_affine=True, bias=True, device=None, dtype=None):
         super(LayerNormSGL, self).__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype)
-        # TODO: bias is unsupported.
 
     def forward(self, x):
-        return torch.nn.functional.layer_norm(
-            x,
-            self.normalized_shape,
-            self.weight,
-            self.bias,
-            self.eps,
+        x_shapes = x.shape
+        # reshape introduces extra memory copy here
+        # x is from previous TPP triangle multiplication kernel and has been padded. The size is [81,81,64] but stride is [81*128, 64, 1]
+        # directly view on this tensor will fail.
+        if len(x_shapes) == 3:
+            x = x.reshape(-1, x.shape[-1])
+        # the output is directly written into x
+        torch.ops.sgl_kernel.layernorm_cpu(
+            x, self.weight, self.bias, self.eps
         )
-
-
-        # TODO: bias is unsupported in torch.ops.sgl_kernel.layernorm_cpu
-        # x_shapes = x.shape
-        # # TODO: reshape introduces extra memory copy here
-        # # x is from previous TPP triangle multiplication kernel and has been padded. The size is [81,81,64] but stride is [81*128, 64, 1]
-        # # directly view on this tensor will fail.
-        # if len(x_shapes) == 3:
-        #     x = x.reshape(-1, x.shape[-1])
-        # torch.ops.sgl_kernel.layernorm_cpu(
-        #     x, self.weight, self.eps
-        # )
-        # if len(x_shapes) == 3:
-        #     x = x.view(x_shapes[0], x_shapes[1], -1)
-        # return x        
+        if len(x_shapes) == 3:
+            x = x.view(x_shapes[0], x_shapes[1], -1)
+        return x
 
 
 class LinearSGL(torch.nn.Linear):
@@ -277,13 +274,81 @@ class GridSelfAttentionSGL(nn.Module):
         return pair
 
 
+class GridSelfAttentionFusedSGLv2(nn.Module):
+    """A+B split: one QKVG concat GEMM + fused attention-tail + out_proj."""
+
+    def __init__(self, c_pair: int = 128, num_head: int = 4, transpose: bool = False):
+        super().__init__()
+        self.c_pair = c_pair
+        self.num_head = num_head
+        self.qkv_dim = self.c_pair // self.num_head
+        self.transpose = transpose
+
+        self.act_norm = LayerNormSGL(self.c_pair)
+        self.pair_bias_projection = LinearSGL(self.c_pair, self.num_head, bias=False)
+
+        # Individual projections for weight loading compatibility.
+        self.q_projection = LinearSGL(self.c_pair, self.c_pair, bias=False)
+        self.k_projection = LinearSGL(self.c_pair, self.c_pair, bias=False)
+        self.v_projection = LinearSGL(self.c_pair, self.c_pair, bias=False)
+        self.gating_query = LinearSGL(self.c_pair, self.c_pair, bias=False)
+        self.output_projection = LinearSGL(self.c_pair, self.c_pair, bias=False)
+
+    def concat_qkvg_weights(self):
+        """Concat Q/K/V/G weights into a single QKVG LinearSGL.
+        
+        Must be called before pack_weight() so that the concat is done on unpacked
+        weights. pack_sgl_weights() will then pack qkvg_projection.weight via
+        the normal LinearSGL.pack_weight() walk.
+        """
+        qkvg_linear = LinearSGL(self.c_pair, 4 * self.c_pair, bias=False)
+        qkvg_linear.weight = torch.nn.Parameter(
+            torch.cat(
+                [
+                    self.q_projection.weight.data,
+                    self.k_projection.weight.data,
+                    self.v_projection.weight.data,
+                    self.gating_query.weight.data,
+                ],
+                dim=0,
+            ),
+            requires_grad=False,
+        )
+        self.qkvg_projection = qkvg_linear
+        # Remove individual projections to free memory; they're no longer needed.
+        del self.q_projection
+        del self.k_projection
+        del self.v_projection
+        del self.gating_query
+
+    @profile("GridSelfAttention")
+    def forward(self, pair, mask):
+        pair = self.act_norm(pair)
+        bias = self.pair_bias_projection(pair).permute(2, 0, 1).contiguous()
+        if self.transpose:
+            pair = pair.permute(1, 0, 2).contiguous()
+
+        out = torch.ops.sgl_kernel.fused_grid_attention_v2(
+            pair,
+            bias,
+            self.qkvg_projection.weight,
+            self.output_projection.weight,
+            self.num_head,
+            True,  # is_vnni
+        )
+
+        if self.transpose:
+            out = out.permute(1, 0, 2)
+        return out
+
+
 if fastnn_config.grid_self_attention_implementation == "cpp":
     if fastnn_config.grid_self_attention_dist:
         GridSelfAttention = DistributedGridSelfAttentionCpp
     else:
         GridSelfAttention = GridSelfAttentionCpp
 elif fastnn_config.grid_self_attention_implementation == "sgl":
-    GridSelfAttention = GridSelfAttentionSGL
+    GridSelfAttention = GridSelfAttentionFusedSGLv2
 else:
     GridSelfAttention = GridSelfAttentionTorch
 
