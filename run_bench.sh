@@ -16,6 +16,23 @@
 export LD_PRELOAD=${LD_PRELOAD}:${CONDA_PREFIX}/lib/libiomp5.so
 export LD_PRELOAD=${LD_PRELOAD}:${CONDA_PREFIX}/lib/libtcmalloc.so
 
+# Select which op bench to run. Default keeps the original grid-self-attention
+# behavior; set OP=tm (or triangle_mul) to bench TriangleMultiplication.
+OP=${OP:-grid_self_attention}
+case "$OP" in
+    grid_self_attention|gsa)
+        SCRIPT=test_grid_self_attention_baseline.py
+        ;;
+    triangle_multiplication|triangle_mul|tm)
+        SCRIPT=test_triangle_multiplication_baseline.py
+        ;;
+    *)
+        echo "### unknown OP=$OP (expected one of: grid_self_attention/gsa, triangle_multiplication/triangle_mul/tm)" >&2
+        exit 2
+        ;;
+esac
+echo "### op bench script: $SCRIPT"
+
 if [ "$1" == "torch" ]; then
     ARGS="$ARGS --torch"
     echo "### running torch kernel"
@@ -55,6 +72,6 @@ PHYS_CORES=$(lscpu -p=CPU,Core,Node | awk -F, -v n=$NUMA_NODE \
     '!/^#/ && $3==n { if (!seen[$2]++) printf("%s%s", sep, $1); sep="," }')
 echo "### binding to NUMA node $NUMA_NODE physical cores: $PHYS_CORES"
 
-numactl --physcpubind=$PHYS_CORES --membind=$NUMA_NODE python -u test_grid_self_attention_baseline.py $ARGS
+numactl --physcpubind=$PHYS_CORES --membind=$NUMA_NODE python -u $SCRIPT $ARGS
 
 # numactl --physcpubind=$PHYS_CORES --membind=$NUMA_NODE python -u test_grid_self_attention.py
