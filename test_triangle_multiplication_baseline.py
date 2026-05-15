@@ -24,11 +24,11 @@ def register_fake_ops():
         print(f"fake: x shape = {x.shape}, w shape = {weight.shape}, out shape = {out_shape}", )
         return x.new_empty(out_shape)
 
-    # Placeholder fakes for future fused triangle-multiplication kernels.
-    # Register them when the kernels land so torch.compile / cpp_wrapper work.
-    # @torch.library.register_fake("sgl_kernel::fused_triangle_multiplication")
-    # def _(pair, mask, proj_w, gate_w, center_w, center_b, out_w, gating_w, outgoing, is_vnni):
-    #     return pair.new_empty(pair.shape)
+    @torch.library.register_fake("sgl_kernel::fused_triangle_multiplication")
+    def _(pair_orig, pair_normed, mask, proj_gate_w,
+          center_norm_w, center_norm_b, out_proj_w, gating_w, outgoing, is_vnni):
+        # In-place residual: the op returns pair_orig itself (clobbered).
+        return pair_orig
 
 
 class TriangleMultiplicationTorch(nn.Module):
@@ -228,7 +228,71 @@ class TriangleMultiplicationSGL(nn.Module):
         return input
 
 
-def main(use_torch, torch_compile, outgoing):
+class TriangleMultiplicationFusedSGL(nn.Module):
+    """Single fused CPU kernel: pre_einsum + einsum + center_norm + post_einsum,
+    matching the v2 grid-attention design (skill: af3-fused-cpu-kernel-perf).
+
+    Wrapper contract (see fused_triangle_multiplication.cpp):
+      - left_norm is applied here in Python (out-of-place); the kernel sees
+        both pair (= input, also output buffer, clobbered in place) and
+        pair_normed (= left_norm(pair)).
+      - All weights are pre-packed via convert_weight_packed.
+      - The op writes the residual-summed result into `pair` and returns it.
+    """
+
+    def __init__(self, m):
+        super().__init__()
+        self.c_pair = m.c_pair
+        self._outgoing = (m.equation == 'cik,cjk->cij')
+
+        import sgl_kernel  # noqa: F401
+
+        def pack(w: torch.Tensor) -> torch.nn.Parameter:
+            return torch.nn.Parameter(
+                torch.ops.sgl_kernel.convert_weight_packed(w.data),
+                requires_grad=False,
+            )
+
+        # Layer norms stay as out-of-place torch ops (v2 convention).
+        self.left_norm_input = copy.deepcopy(m.left_norm_input)
+        self.center_norm_weight = torch.nn.Parameter(
+            m.center_norm.weight.data.clone(), requires_grad=False)
+        if m.center_norm.bias is not None:
+            self.center_norm_bias = torch.nn.Parameter(
+                m.center_norm.bias.data.clone(), requires_grad=False)
+        else:
+            self.center_norm_bias = None
+
+        # Concat proj | gate along the output dim -> [4C, C], then pack once.
+        proj_gate_unpacked = torch.cat(
+            [m.projection.weight.data, m.gate.weight.data], dim=0)  # [4C, C]
+        self.proj_gate_weight = pack(proj_gate_unpacked)
+        self.out_proj_weight = pack(m.output_projection.weight.data)
+        self.gating_weight = pack(m.gating_linear.weight.data)
+
+    def forward(self, pair: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # Left norm out-of-place; pair stays unchanged for the in-kernel residual.
+        pair_normed = self.left_norm_input(pair)
+        # Ensure mask is bf16 contiguous as the kernel expects.
+        if mask.dtype != pair.dtype:
+            mask = mask.to(pair.dtype)
+        if not mask.is_contiguous():
+            mask = mask.contiguous()
+        return torch.ops.sgl_kernel.fused_triangle_multiplication(
+            pair,                      # pair_orig (in/out, clobbered in place)
+            pair_normed,
+            mask,
+            self.proj_gate_weight,
+            self.center_norm_weight,
+            self.center_norm_bias,
+            self.out_proj_weight,
+            self.gating_weight,
+            self._outgoing,
+            True,                      # is_vnni
+        )
+
+
+def main(use_torch, torch_compile, use_fused, outgoing):
     c_pair = 128
 
     if use_torch:
@@ -247,8 +311,11 @@ def main(use_torch, torch_compile, outgoing):
             m_ref.center_norm.bias.copy_(0.2 + 0.1 * torch.randn_like(m_ref.center_norm.bias))
 
         # The pure-torch module is used only for the correctness reference.
-        # The benchmarked path is the SGL variant.
-        m = TriangleMultiplicationSGL(m_ref)
+        # The benchmarked path is the SGL variant (drop-in or fused).
+        if use_fused:
+            m = TriangleMultiplicationFusedSGL(m_ref)
+        else:
+            m = TriangleMultiplicationSGL(m_ref)
     else:
         from af3_kernels import TriangleMultiplicationCpp
         m = TriangleMultiplicationCpp(c_pair=c_pair, _outgoing=outgoing)
@@ -319,8 +386,12 @@ if __name__ == "__main__":
                         help='use the SGL drop-in (pure torch is reference only). '
                              'Without this flag, benchmarks the xfold C++ kernel.')
     parser.add_argument('--torch-compile', action='store_true')
+    parser.add_argument('--fused', action='store_true',
+                        help='use the single fused TM CPU kernel '
+                             '(sgl_kernel::fused_triangle_multiplication). '
+                             'Requires --torch.')
     parser.add_argument('--incoming', action='store_true',
                         help='use the incoming equation (ckj,cki->cij); default is outgoing (cik,cjk->cij)')
     args = parser.parse_args()
 
-    main(args.torch, args.torch_compile, not args.incoming)
+    main(args.torch, args.torch_compile, args.fused, not args.incoming)

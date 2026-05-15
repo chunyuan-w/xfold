@@ -55,6 +55,9 @@ if [ "$1" == "torch" ]; then
     elif [ "$2" == "fused5" ]; then
         ARGS="$ARGS --fused5"
         echo "### running fused sgl kernel v5 (per-b parallel, per-thread qkvg_row)"
+    elif [ "$2" == "fused" ]; then
+        ARGS="$ARGS --fused"
+        echo "### running fused sgl kernel (TriangleMultiplication: single op, stage-split A/B/C)"
     else
         echo "### running eager"
     fi
