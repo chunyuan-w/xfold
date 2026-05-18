@@ -22,9 +22,14 @@ OP=${OP:-grid_self_attention}
 case "$OP" in
     grid_self_attention|gsa)
         SCRIPT=test_grid_self_attention_baseline.py
+        # v2 is the winning variant (concat QKVG + fused attn-tail + in-place out_proj).
+        FUSED_FLAG=--fused2
+        FUSED_DESC="v2 (QKVG concat + fused attn-tail + out_proj)"
         ;;
     triangle_multiplication|triangle_mul|tm)
         SCRIPT=test_triangle_multiplication_baseline.py
+        FUSED_FLAG=--fused
+        FUSED_DESC="stage-split A/B/C"
         ;;
     *)
         echo "### unknown OP=$OP (expected one of: grid_self_attention/gsa, triangle_multiplication/triangle_mul/tm)" >&2
@@ -40,24 +45,13 @@ if [ "$1" == "torch" ]; then
     if [ "$2" == "compile" ]; then
         ARGS="$ARGS --torch-compile"
         echo "### running torch compile"
-    elif [ "$2" == "fused" ]; then
-        ARGS="$ARGS --fused"
-        echo "### running fused sgl kernel (single QKV+attn+gate+out_proj op)"
     elif [ "$2" == "fused2" ]; then
-        ARGS="$ARGS --fused2"
-        echo "### running fused sgl kernel v2 (QKVG concat + fused attn-tail + out_proj)"
-    elif [ "$2" == "fused3" ]; then
-        ARGS="$ARGS --fused3"
-        echo "### running fused sgl kernel v3 (per-head tiled proj + full-logit attn core)"
-    elif [ "$2" == "fused4" ]; then
-        ARGS="$ARGS --fused4"
-        echo "### running fused sgl kernel v4 (B-tiled qkvg scratch, L3-sized)"
-    elif [ "$2" == "fused5" ]; then
-        ARGS="$ARGS --fused5"
-        echo "### running fused sgl kernel v5 (per-b parallel, per-thread qkvg_row)"
+        echo "### ERROR: 'fused2' is deprecated as a run_bench.sh arg. Use 'fused' instead." >&2
+        echo "###        For OP=gsa, 'fused' now routes to --fused2 (the v2 winner) automatically." >&2
+        exit 2
     elif [ "$2" == "fused" ]; then
-        ARGS="$ARGS --fused"
-        echo "### running fused sgl kernel (TriangleMultiplication: single op, stage-split A/B/C)"
+        ARGS="$ARGS $FUSED_FLAG"
+        echo "### running fused sgl kernel ($FUSED_DESC)"
     else
         echo "### running eager"
     fi
