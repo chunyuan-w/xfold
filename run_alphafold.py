@@ -309,8 +309,9 @@ class ModelRunner:
             k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v for k, v in featurised_example.items()
         }
         self._model.to(dtype=torch.bfloat16)
-        print('packing SGL weights...')
-        pack_sgl_weights(self._model)
+        if fastnn_config.grid_self_attention_implementation == 'sgl':
+            print('packing SGL weights...')
+            pack_sgl_weights(self._model)
 
         print('=== Featurised tensor shapes ===')
         for key in sorted(featurised_example):
