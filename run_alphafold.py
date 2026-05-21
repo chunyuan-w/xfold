@@ -46,7 +46,7 @@ from alphafold3.model import features
 from alphafold3.model import post_processing
 from alphafold3.model.components import base_model
 from alphafold3.model.components import utils
-from alphafold3.model.diffusion.model import Diffuser
+# from alphafold3.model.diffusion.model import Diffuser
 
 import numpy as np
 import torch
@@ -59,6 +59,7 @@ from af3_kernels import reset_debug_timers, print_debug_timers
 from af3_kernels.tools import DO_PROFILE, USE_DIST
 
 from xfold.alphafold3 import AlphaFold3
+from xfold.postproc import get_inference_result
 from xfold.params import import_jax_weights_
 from xfold.fastnn import config as fastnn_config
 from xfold.nn.attention import pack_sgl_weights
@@ -358,7 +359,7 @@ class ModelRunner:
     ) -> list[base_model.InferenceResult]:
         """Generates structures from model outputs."""
         return list(
-            Diffuser.get_inference_result(
+            get_inference_result(
                 batch=batch, result=result, target_name=target_name
             )
         )
