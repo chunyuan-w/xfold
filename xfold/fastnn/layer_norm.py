@@ -15,10 +15,11 @@ from xfold.fastnn import config as fastnn_config
 
 from af3_kernels.tools import profile
 
-try:
-    import intel_extension_for_pytorch as ipex
-except ImportError:
-    ipex = None
+# try:
+#     import intel_extension_for_pytorch as ipex
+# except ImportError:
+#     ipex = None
+ipex = None
 
 _shape_t = Union[int, List[int], Size]
 
