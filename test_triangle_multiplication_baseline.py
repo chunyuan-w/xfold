@@ -360,14 +360,27 @@ def main(use_torch, torch_compile, use_fused, outgoing, model_sequence, n_token,
 
     with torch.no_grad():
         if use_torch:
-            y_ref = m_ref(pair, mask)
+            # The fused kernel clobbers pair_orig in place and returns that
+            # same buffer; the torch reference is out-of-place.  Give each
+            # path its own input clone and detach the outputs with .clone()
+            # so the comparison can't be silently aliased by either side's
+            # in-place behavior.
+            pair_ref   = pair.clone()
+            pair_fused = pair.clone()
+            y_ref  = m_ref(pair_ref,   mask).clone()
+            # Sanity: torch reference must not mutate its input.
+            assert torch.equal(pair_ref, pair), \
+                "torch reference unexpectedly mutated its input"
 
         if torch_compile:
             m = torch.compile(m)
-            _ = m(pair, mask)
+            _ = m(pair.clone(), mask)
 
         if use_torch:
-            y_test = m(pair, mask)
+            y_test = m(pair_fused, mask).clone()
+            # Sanity: fused path is in-place by contract.
+            assert not torch.equal(pair_fused, pair), \
+                "fused path unexpectedly left its input untouched"
             # Looser tolerance than the GSA bench: TM's einsum reduces over k
             # of length N_token (~4655 here), so bf16 round-on-store accumulates
             # to a few ulps (~0.03 max abs) even with an fp32 brgemm accumulator.
