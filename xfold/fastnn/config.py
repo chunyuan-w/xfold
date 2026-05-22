@@ -21,8 +21,10 @@ grid_self_attention_implementation = os.environ.get(
 # options: ["torch", ""cpp"]
 self_attention_implementation = "cpp"
 
-# options: ["torch", ""cpp"]
-triangle_multiplication_implementation = "cpp"
+# options: ["torch", "cpp", "sgl"]
+triangle_multiplication_implementation = os.environ.get(
+	"AF3_TRIANGLE_MULTIPLICATION_IMPL", "cpp"
+)
 
 # Whether to use the distributed C++ implementation of the  modules
 grid_self_attention_dist = USE_DIST
