@@ -41,6 +41,8 @@ def pack_sgl_weights(module: nn.Module):
     for submodule in module.modules():
         if hasattr(submodule, 'concat_qkvg_weights') and callable(submodule.concat_qkvg_weights):
             submodule.concat_qkvg_weights()
+        if hasattr(submodule, 'concat_proj_gate_weights') and callable(submodule.concat_proj_gate_weights):
+            submodule.concat_proj_gate_weights()
     # Second pass: pack all LinearSGL weights (including the newly created fused ones).
     for submodule in module.modules():
         if hasattr(submodule, 'pack_weight') and callable(submodule.pack_weight):
