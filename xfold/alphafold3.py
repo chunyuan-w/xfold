@@ -10,6 +10,8 @@
 # https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md
 
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -41,6 +43,7 @@ class Evoformer(nn.Module):
         self.seq_channel = 384
         self.pair_channel = 128
         self.c_target_feat = 447
+        self._pairformer_profile_done = False
 
         self.left_single = nn.Linear(
             self.c_target_feat, self.pair_channel, bias=False)
@@ -265,9 +268,43 @@ class Evoformer(nn.Module):
         single_activations += self.prev_single_embedding(
             self.prev_single_embedding_layer_norm(prev['single']))
 
-        for pairformer_b in tqdm(self.trunk_pairformer, desc=f"Pairformer {idx}"):
-            pair_activations, single_activations = pairformer_b(
-                pair_activations, self.pair_mask, single_activations, batch.token_features.mask)
+        profile_pairformer = os.environ.get("AF3_PROFILE_PAIRFORMER", "0").lower() not in ("", "0", "false")
+        profile_pairformer_recycle = int(os.environ.get("AF3_PROFILE_PAIRFORMER_RECYCLE", "0"))
+        profile_pairformer_block = max(1, int(os.environ.get("AF3_PROFILE_PAIRFORMER_BLOCK", "1")))
+        profile_pairformer_rows = int(os.environ.get("AF3_PROFILE_PAIRFORMER_ROWS", "80"))
+        profile_pairformer_shapes = os.environ.get("AF3_PROFILE_PAIRFORMER_RECORD_SHAPES", "1").lower() not in ("", "0", "false")
+
+        for pairformer_idx, pairformer_b in enumerate(tqdm(self.trunk_pairformer, desc=f"Pairformer {idx}")):
+            should_profile_pairformer = (
+                profile_pairformer
+                and not self._pairformer_profile_done
+                and idx == profile_pairformer_recycle
+                and pairformer_idx == profile_pairformer_block
+            )
+            if should_profile_pairformer:
+                from torch.profiler import ProfilerActivity
+                from torch.profiler import profile as torch_profile
+
+                print(
+                    "[AF3_PROFILE_PAIRFORMER] profiling "
+                    f"recycle={idx}, block={pairformer_idx}, "
+                    f"record_shapes={profile_pairformer_shapes}"
+                )
+                with torch_profile(
+                        activities=[ProfilerActivity.CPU],
+                        record_shapes=profile_pairformer_shapes) as prof:
+                    pair_activations, single_activations = pairformer_b(
+                        pair_activations, self.pair_mask, single_activations, batch.token_features.mask)
+                print(
+                    prof.key_averages(group_by_input_shape=profile_pairformer_shapes).table(
+                        sort_by="self_cpu_time_total",
+                        row_limit=profile_pairformer_rows,
+                    )
+                )
+                self._pairformer_profile_done = True
+            else:
+                pair_activations, single_activations = pairformer_b(
+                    pair_activations, self.pair_mask, single_activations, batch.token_features.mask)
 
         output = {
             'single': single_activations,
