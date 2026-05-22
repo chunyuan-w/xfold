@@ -19,17 +19,36 @@ export LD_PRELOAD=${LD_PRELOAD}:${CONDA_PREFIX}/lib/libtcmalloc.so
 # Select which op bench to run. Default keeps the original grid-self-attention
 # behavior; set OP=tm (or triangle_mul) to bench TriangleMultiplication.
 OP=${OP:-grid_self_attention}
+ARGS=""
 case "$OP" in
     grid_self_attention|gsa)
         SCRIPT=test_grid_self_attention_baseline.py
         # v2 is the winning variant (concat QKVG + fused attn-tail + in-place out_proj).
         FUSED_FLAG=--fused2
         FUSED_DESC="v2 (QKVG concat + fused attn-tail + out_proj)"
+        N_TOKEN=${N_TOKEN:-2752}
+        C_PAIR=${C_PAIR:-128}
+        ARGS="$ARGS --n-token ${N_TOKEN} --c-pair ${C_PAIR}"
+        if [[ "${MODEL_SEQUENCE:-0}" == "1" || "${MODEL_SEQUENCE:-0}" == "true" || "${MODEL_SEQUENCE:-0}" == "True" ]]; then
+            ARGS="$ARGS --model-sequence"
+            echo "### running model sequence"
+        fi
         ;;
     triangle_multiplication|triangle_mul|tm)
         SCRIPT=test_triangle_multiplication_baseline.py
         FUSED_FLAG=--fused
         FUSED_DESC="stage-split A/B/C"
+        N_TOKEN=${N_TOKEN:-2752}
+        C_PAIR=${C_PAIR:-128}
+        ARGS="$ARGS --n-token ${N_TOKEN} --c-pair ${C_PAIR}"
+        if [[ "${INCOMING:-0}" == "1" || "${INCOMING:-0}" == "true" || "${INCOMING:-0}" == "True" ]]; then
+            ARGS="$ARGS --incoming"
+            echo "### running incoming triangle multiplication"
+        fi
+        if [[ "${MODEL_SEQUENCE:-0}" == "1" || "${MODEL_SEQUENCE:-0}" == "true" || "${MODEL_SEQUENCE:-0}" == "True" ]]; then
+            ARGS="$ARGS --model-sequence"
+            echo "### running model sequence"
+        fi
         ;;
     *)
         echo "### unknown OP=$OP (expected one of: grid_self_attention/gsa, triangle_multiplication/triangle_mul/tm)" >&2
@@ -57,7 +76,6 @@ if [ "$1" == "torch" ]; then
     fi
 
 else
-    ARGS=""
     echo "### running xfold kernel"
 fi
 

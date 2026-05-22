@@ -154,24 +154,10 @@ class TriangleMultiplicationSGL(nn.Module):
                 requires_grad=False,
             )
 
-        # NOTE: left_norm_input intentionally uses torch.nn.LayerNorm (not
-        # LayerNormSGL) because LayerNormSGL writes its result in-place into
-        # the input buffer. TM has a residual at the end (`input + pair`)
-        # where `input` aliases the pre-layernorm tensor, so an in-place
-        # left-norm corrupts the residual. center_norm is safe to keep on
-        # LayerNormSGL because by then `pair` is a fresh tensor from the
-        # einsum + permute + .contiguous().
-        # TODO: revisit when LayerNormSGL grows an out-of-place variant (or
-        # when we have a fused TM kernel that handles the residual itself).
         self.left_norm_input = copy.deepcopy(m.left_norm_input)
-        # `projection` stays as a regular packed linear (mask is applied to its
-        # output before it's consumed as `post_mul_mat`).
         self.projection = LinearSGL(m.projection)
-        # `gate` is consumed by sigmoid_mul; we only need the packed weight.
-        # Dropping the proj/gate concat here: site-1 sigmoid_mul fusion (avoids
-        # the ~11 GB gate intermediate at N=4655) beats sharing a GEMM with proj.
         self.gate_weight = pack(m.gate.weight)
-        self.center_norm = LayerNormSGL(m.center_norm)
+        self.center_norm = copy.deepcopy(m.center_norm)
         self.output_projection = LinearSGL(m.output_projection)
         self.gating_linear_weight = pack(m.gating_linear.weight)
 
@@ -189,8 +175,8 @@ class TriangleMultiplicationSGL(nn.Module):
             projection = projection * mask.unsqueeze(-1)
 
         # Site 1: projection *= sigmoid(gate(pair))  fused.
-        pair_flat = pair.reshape(M, C)
-        proj_flat = projection.reshape(M, twoC)
+        pair_flat = pair.view(M, C)
+        proj_flat = projection.view(M, twoC)
         proj_flat = torch.ops.sgl_kernel.weight_packed_linear_sigmoid_mul(
             pair_flat,
             self.gate_weight,
@@ -212,8 +198,8 @@ class TriangleMultiplicationSGL(nn.Module):
         pair = self.output_projection(pair)         # [N, N, C]
 
         # Site 2: pair *= sigmoid(gating_linear(input_pair))  fused.
-        pair_flat = pair.reshape(M, C)
-        input_pair_flat = input_pair.reshape(M, C)
+        pair_flat = pair.view(M, C)
+        input_pair_flat = input_pair.view(M, C)
         pair_flat = torch.ops.sgl_kernel.weight_packed_linear_sigmoid_mul(
             input_pair_flat,
             self.gating_linear_weight,
@@ -224,7 +210,7 @@ class TriangleMultiplicationSGL(nn.Module):
         )
         pair = pair_flat.view(N1, N2, C)
 
-        input = input + pair
+        input += pair
         return input
 
 
@@ -292,8 +278,38 @@ class TriangleMultiplicationFusedSGL(nn.Module):
         )
 
 
-def main(use_torch, torch_compile, use_fused, outgoing):
-    c_pair = 128
+class TriangleMultiplicationSequence(nn.Module):
+    def __init__(self, outgoing_module, incoming_module):
+        super().__init__()
+        self.outgoing_module = outgoing_module
+        self.incoming_module = incoming_module
+
+    def forward(self, pair: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        pair = self.outgoing_module(pair, mask)
+        pair = self.incoming_module(pair, mask)
+        return pair
+
+
+def init_layer_norms(module: nn.Module) -> None:
+    with torch.no_grad():
+        module.left_norm_input.weight.copy_(
+            1.0 + 0.1 * torch.randn_like(module.left_norm_input.weight)
+        )
+        module.left_norm_input.bias.copy_(
+            0.2 + 0.1 * torch.randn_like(module.left_norm_input.bias)
+        )
+        module.center_norm.weight.copy_(
+            1.0 + 0.1 * torch.randn_like(module.center_norm.weight)
+        )
+        module.center_norm.bias.copy_(
+            0.2 + 0.1 * torch.randn_like(module.center_norm.bias)
+        )
+
+
+def main(use_torch, torch_compile, use_fused, outgoing, model_sequence, n_token, c_pair):
+    if model_sequence and not use_fused:
+        if use_torch:
+            raise ValueError("--model-sequence expects --fused so outgoing uses the fused SGL kernel")
 
     if use_torch:
         import sgl_kernel  # noqa: F401
@@ -301,38 +317,44 @@ def main(use_torch, torch_compile, use_fused, outgoing):
         if torch_compile:
             register_fake_ops()
 
-        m_ref = TriangleMultiplicationTorch(c_pair=c_pair, _outgoing=outgoing)
-        m_ref = m_ref.to(torch.bfloat16)
-        m_ref.eval()
-        with torch.no_grad():
-            m_ref.left_norm_input.weight.copy_(1.0 + 0.1 * torch.randn_like(m_ref.left_norm_input.weight))
-            m_ref.left_norm_input.bias.copy_(0.2 + 0.1 * torch.randn_like(m_ref.left_norm_input.bias))
-            m_ref.center_norm.weight.copy_(1.0 + 0.1 * torch.randn_like(m_ref.center_norm.weight))
-            m_ref.center_norm.bias.copy_(0.2 + 0.1 * torch.randn_like(m_ref.center_norm.bias))
-
-        # The pure-torch module is used only for the correctness reference.
-        # The benchmarked path is the SGL variant (drop-in or fused).
-        if use_fused:
-            m = TriangleMultiplicationFusedSGL(m_ref)
+        if model_sequence:
+            m_ref_outgoing = TriangleMultiplicationTorch(c_pair=c_pair, _outgoing=True).to(torch.bfloat16)
+            m_ref_incoming = TriangleMultiplicationTorch(c_pair=c_pair, _outgoing=False).to(torch.bfloat16)
+            init_layer_norms(m_ref_outgoing)
+            init_layer_norms(m_ref_incoming)
+            m_ref = TriangleMultiplicationSequence(m_ref_outgoing, m_ref_incoming)
+            m = TriangleMultiplicationSequence(
+                TriangleMultiplicationFusedSGL(m_ref_outgoing),
+                TriangleMultiplicationFusedSGL(m_ref_incoming),
+            )
+            print("### model sequence: outgoing fused SGL + incoming fused SGL")
         else:
-            m = TriangleMultiplicationSGL(m_ref)
+            m_ref = TriangleMultiplicationTorch(c_pair=c_pair, _outgoing=outgoing).to(torch.bfloat16)
+            init_layer_norms(m_ref)
+            if use_fused:
+                m = TriangleMultiplicationFusedSGL(m_ref)
+            else:
+                m = TriangleMultiplicationSGL(m_ref)
     else:
         from af3_kernels import TriangleMultiplicationCpp
-        m = TriangleMultiplicationCpp(c_pair=c_pair, _outgoing=outgoing)
+        if model_sequence:
+            m = TriangleMultiplicationSequence(
+                TriangleMultiplicationCpp(c_pair=c_pair, _outgoing=True),
+                TriangleMultiplicationCpp(c_pair=c_pair, _outgoing=False),
+            )
+            print("### model sequence: outgoing xfold C++ + incoming xfold C++")
+        else:
+            m = TriangleMultiplicationCpp(c_pair=c_pair, _outgoing=outgoing)
         m = m.to(torch.bfloat16)
 
     m.eval()
     print("done model creation")
 
-    # Keep the same default shape as the grid-attention bench so timings are
-    # directly comparable across the two ops on the same machine.
-    N_token = 4655
+    warmup = 20 if n_token <= 1024 else 10
+    measure = 50 if n_token <= 1024 else 20
 
-    warmup = 20 if N_token <= 1024 else 10
-    measure = 50 if N_token <= 1024 else 20
-
-    pair = torch.randn(N_token, N_token, c_pair, dtype=torch.bfloat16)
-    mask = torch.ones(N_token, N_token, dtype=torch.bfloat16)
+    pair = torch.randn(n_token, n_token, c_pair, dtype=torch.bfloat16)
+    mask = torch.ones(n_token, n_token, dtype=torch.bfloat16)
     assert torch.all(mask == 1)
     print("done tensor creation")
 
@@ -392,6 +414,13 @@ if __name__ == "__main__":
                              'Requires --torch.')
     parser.add_argument('--incoming', action='store_true',
                         help='use the incoming equation (ckj,cki->cij); default is outgoing (cik,cjk->cij)')
+    parser.add_argument('--model-sequence', action='store_true',
+                        help='benchmark the current model sequence: outgoing fused SGL followed by incoming fused SGL')
+    parser.add_argument('--n-token', type=int, default=2752,
+                        help='token count; default matches the current Piezo2 model benchmark')
+    parser.add_argument('--c-pair', type=int, default=128,
+                        help='pair channel count; default matches trunk pairformer')
     args = parser.parse_args()
 
-    main(args.torch, args.torch_compile, args.fused, not args.incoming)
+    main(args.torch, args.torch_compile, args.fused, not args.incoming,
+         args.model_sequence, args.n_token, args.c_pair)
