@@ -19,6 +19,40 @@ from xfold.fastnn import config as fastnn_config
 from af3_kernels import TriangleMultiplicationCpp, DistributedTriangleMultiplicationCpp
 from af3_kernels.tools import profile
 
+if fastnn_config.triangle_multiplication_implementation == "sgl":
+    import sgl_kernel  # noqa: F401
+
+
+class LinearSGL(torch.nn.Linear):
+
+    def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
+        super(LinearSGL, self).__init__(in_features, out_features, bias, device, dtype)
+
+    def pack_weight(self):
+        weight = self.weight.data
+        packed_weight = torch.nn.Parameter(
+            torch.ops.sgl_kernel.convert_weight_packed(weight),
+            requires_grad=False,
+        )
+        self.weight = packed_weight
+
+        if hasattr(self, "bias") and self.bias is not None:
+            self.bias = torch.nn.Parameter(self.bias.data.float(), requires_grad=False)
+
+    def forward(self, x):
+        x_shapes = x.shape
+        if len(x_shapes) == 3:
+            x = x.view(-1, x.shape[-1])
+        output = torch.ops.sgl_kernel.weight_packed_linear(
+            x,
+            self.weight,
+            self.bias if hasattr(self, "bias") else None,
+            True,
+        )
+        if len(x_shapes) == 3:
+            output = output.view(x_shapes[0], x_shapes[1], -1)
+        return output
+
 
 class TriangleMultiplicationTorch(nn.Module):
     def __init__(self, c_pair: int = 128, _outgoing: bool = True) -> None:
@@ -75,7 +109,63 @@ class TriangleMultiplicationTorch(nn.Module):
         return input
 
 
-if fastnn_config.triangle_multiplication_implementation == "cpp":
+class TriangleMultiplicationSGL(nn.Module):
+    def __init__(self, c_pair: int = 128, _outgoing: bool = True) -> None:
+        super().__init__()
+        self.c_pair = c_pair
+        self._outgoing = _outgoing
+
+        self.left_norm_input = fastnn.LayerNorm(self.c_pair)
+        self.projection = LinearSGL(self.c_pair, 2 * self.c_pair, bias=False)
+        self.gate = LinearSGL(self.c_pair, 2 * self.c_pair, bias=False)
+        self.center_norm = fastnn.LayerNorm(self.c_pair)
+        self.output_projection = LinearSGL(self.c_pair, self.c_pair, bias=False)
+        self.gating_linear = LinearSGL(self.c_pair, self.c_pair, bias=False)
+
+        self.equation = 'ckj,cki->cij'
+        if _outgoing is True:
+            self.equation = 'cik,cjk->cij'
+
+    def concat_proj_gate_weights(self):
+        proj_gate_linear = LinearSGL(self.c_pair, 4 * self.c_pair, bias=False)
+        proj_gate_linear.weight = torch.nn.Parameter(
+            torch.cat(
+                [
+                    self.projection.weight.data,
+                    self.gate.weight.data,
+                ],
+                dim=0,
+            ),
+            requires_grad=False,
+        )
+        self.proj_gate_projection = proj_gate_linear
+        del self.projection
+        del self.gate
+
+    @profile("TriangleMultiplication")
+    def forward(self, pair: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        pair_normed = self.left_norm_input(pair)
+        if mask.dtype != pair.dtype:
+            mask = mask.to(pair.dtype)
+        if not mask.is_contiguous():
+            mask = mask.contiguous()
+        return torch.ops.sgl_kernel.fused_triangle_multiplication(
+            pair,
+            pair_normed,
+            mask,
+            self.proj_gate_projection.weight,
+            self.center_norm.weight,
+            self.center_norm.bias,
+            self.output_projection.weight,
+            self.gating_linear.weight,
+            self._outgoing,
+            True,
+        )
+
+
+if fastnn_config.triangle_multiplication_implementation == "sgl":
+    TriangleMultiplication = TriangleMultiplicationSGL
+elif fastnn_config.triangle_multiplication_implementation == "cpp":
     if fastnn_config.triangle_multiplication_dist:
         TriangleMultiplication = DistributedTriangleMultiplicationCpp
     else:
