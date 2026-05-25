@@ -153,12 +153,12 @@ class LayerNormSGL(torch.nn.LayerNorm):
 
     def forward(self, x):
         x_shapes = x.shape
-        # reshape introduces extra memory copy here
-        # x is from previous TPP triangle multiplication kernel and has been padded. The size is [81,81,64] but stride is [81*128, 64, 1]
-        # directly view on this tensor will fail.
+        # layernorm_cpu writes into its input. Clone so GSA normalization does not
+        # clobber the caller's residual tensor used by pair += attention(pair).
         if len(x_shapes) == 3:
-            x = x.reshape(-1, x.shape[-1])
-        # the output is directly written into x
+            x = x.reshape(-1, x.shape[-1]).clone()
+        else:
+            x = x.clone()
         torch.ops.sgl_kernel.layernorm_cpu(
             x, self.weight, self.bias, self.eps
         )
