@@ -325,6 +325,16 @@ class GridSelfAttentionFusedSGLv2(nn.Module):
 
     @profile("GridSelfAttention")
     def forward(self, pair, mask):
+        # fused_grid_attention_v2 has no mask input, so this backend silently
+        # ignores `mask`. That is only correct when the mask is all-ones, i.e.
+        # features are not bucket-padded. Guard the assumption rather than
+        # produce wrong results on padded inputs.
+        assert not fastnn_config.pad_to_buckets, (
+            "grid_self_attention_implementation='sgl' (GridSelfAttentionFusedSGLv2) "
+            "ignores the attention mask and assumes it is all-ones, which only holds "
+            "without bucket padding. Run with --pad_to_buckets=False, or use the "
+            "'cpp' grid self attention backend."
+        )
         pair = self.act_norm(pair)
         bias = self.pair_bias_projection(pair).permute(2, 0, 1).contiguous()
         if self.transpose:
