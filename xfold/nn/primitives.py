@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from xfold import fastnn
+from xfold.fastnn import config as fastnn_config
 from af3_kernels.tools import profile
 
 
@@ -27,16 +28,37 @@ class Transition(nn.Module):
         self.input_layer_norm = fastnn.LayerNorm(c_x)
         self.transition1 = nn.Linear(
             c_x, self.num_intermediate_factor * c_x * 2, bias=False)
-        self.transition1_weight_t = None # cache transposed weight
+        self.transition1_weight_t = None # cache transposed weight (cpp/torch/triton)
+        self.transition1_weight_packed = None  # cache convert_weight_packed'd weight (sgl)
         self.transition2 = nn.Linear(
             self.num_intermediate_factor * c_x, c_x, bias=False)
+
+    def pack_weight(self) -> None:
+        if fastnn_config.gated_linear_unit_implementation != "sgl":
+            return
+        if self.transition1_weight_packed is None:
+            import sgl_kernel  # noqa: F401
+            self.transition1_weight_packed = torch.nn.Parameter(
+                torch.ops.sgl_kernel.convert_weight_packed(self.transition1.weight.data),
+                requires_grad=False,
+            )
+
+    def _glu_weight(self) -> torch.Tensor:
+        if fastnn_config.gated_linear_unit_implementation == "sgl":
+            assert self.transition1_weight_packed is not None, (
+                "sgl gated_linear_unit requires pre-packed weights; call "
+                "pack_sgl_weights(model) after loading weights (it invokes "
+                "Transition.pack_weight)."
+            )
+            return self.transition1_weight_packed
+        if self.transition1_weight_t is None:
+            self.transition1_weight_t = self.transition1.weight.T.contiguous()
+        return self.transition1_weight_t
 
     @profile("Transition")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.input_layer_norm(x)
-        if self.transition1_weight_t is None:
-            self.transition1_weight_t = self.transition1.weight.T.contiguous()
-        c = fastnn.gated_linear_unit(x, self.transition1_weight_t)
+        c = fastnn.gated_linear_unit(x, self._glu_weight())
         return self.transition2(c)
 
 

@@ -10,8 +10,10 @@ layer_norm_implementation = "torch"
 # options: ["torch", "triton", "cpp"]
 dot_product_attention_implementation = "cpp"
 
-# options: ["torch", "triton", "cpp"]
-gated_linear_unit_implementation = "cpp"
+# options: ["torch", "triton", "cpp", "sgl"]
+gated_linear_unit_implementation = os.environ.get(
+	"AF3_GATED_LINEAR_UNIT_IMPL", "cpp"
+)
 
 # options: ["torch", "cpp", "sgl"]
 grid_self_attention_implementation = os.environ.get(

@@ -310,7 +310,8 @@ class ModelRunner:
         }
         self._model.to(dtype=torch.bfloat16)
         if (fastnn_config.grid_self_attention_implementation == 'sgl' or
-            fastnn_config.triangle_multiplication_implementation == 'sgl'):
+            fastnn_config.triangle_multiplication_implementation == 'sgl' or
+            fastnn_config.gated_linear_unit_implementation == 'sgl'):
             print('packing SGL weights...')
             pack_sgl_weights(self._model)
 

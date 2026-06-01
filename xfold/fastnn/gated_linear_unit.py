@@ -123,10 +123,21 @@ def gated_linear_unit_torch(x, weight):
     return out
 
 
+def gated_linear_unit_sgl(x: torch.Tensor, packed_weight: torch.Tensor) -> torch.Tensor:
+    import sgl_kernel  # noqa: F401
+
+    x_shape = x.shape
+    x2d = x.reshape(-1, x_shape[-1])
+    out = torch.ops.sgl_kernel.weight_packed_linear_silu_mul(x2d, packed_weight, True)
+    return out.view(*x_shape[:-1], out.shape[-1])
+
+
 @profile()
 def gated_linear_unit(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     if fastnn_config.gated_linear_unit_implementation == "cpp":
         out = gated_linear_unit_cpp(x, weight)
+    elif fastnn_config.gated_linear_unit_implementation == "sgl":
+        out = gated_linear_unit_sgl(x, weight)
     elif fastnn_config.gated_linear_unit_implementation == "torch":
         out = gated_linear_unit_torch(x, weight)
     elif fastnn_config.gated_linear_unit_implementation == "triton":
