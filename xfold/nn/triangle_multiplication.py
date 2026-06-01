@@ -145,14 +145,20 @@ class TriangleMultiplicationSGL(nn.Module):
     @profile("TriangleMultiplication")
     def forward(self, pair: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         pair_normed = self.left_norm_input(pair)
-        if mask.dtype != pair.dtype:
-            mask = mask.to(pair.dtype)
-        if not mask.is_contiguous():
-            mask = mask.contiguous()
+        # Fast path: without bucket padding the pair mask is all-ones, so pass
+        # None and let the kernel skip the mask load + multiply entirely.
+        if not fastnn_config.pad_to_buckets:
+            mask_arg = None
+        else:
+            if mask.dtype != pair.dtype:
+                mask = mask.to(pair.dtype)
+            if not mask.is_contiguous():
+                mask = mask.contiguous()
+            mask_arg = mask
         return torch.ops.sgl_kernel.fused_triangle_multiplication(
             pair,
             pair_normed,
-            mask,
+            mask_arg,
             self.proj_gate_projection.weight,
             self.center_norm.weight,
             self.center_norm.bias,

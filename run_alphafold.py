@@ -719,6 +719,9 @@ def main(_):
 
     print(f'Processing {len(fold_inputs)} fold inputs.')
     buckets = _BUCKETS if _PAD_TO_BUCKETS.value else None
+    # Let the SGL triangle multiplication kernel skip the (all-ones) mask when
+    # bucket padding is disabled.
+    fastnn_config.pad_to_buckets = _PAD_TO_BUCKETS.value
     print(
         'Bucket padding '
         f'{"enabled" if _PAD_TO_BUCKETS.value else "disabled"}. '

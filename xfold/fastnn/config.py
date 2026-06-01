@@ -29,3 +29,9 @@ triangle_multiplication_implementation = os.environ.get(
 # Whether to use the distributed C++ implementation of the  modules
 grid_self_attention_dist = USE_DIST
 triangle_multiplication_dist = False # Disabled by default
+
+# Whether features are padded to bucket sizes. When False (exact token length),
+# the token/pair masks are all-ones, so the SGL triangle multiplication kernel
+# can skip the mask entirely. Set from run_alphafold's --pad_to_buckets flag.
+# Default True is the safe choice (always apply the mask).
+pad_to_buckets = True
