@@ -115,7 +115,8 @@ class DiffusionTransition(nn.Module):
             self.c_x, self.c_single_cond, self.use_single_cond)
         self.transition1 = nn.Linear(
             self.c_x, 2 * self.c_x * self.num_intermediate_factor, bias=False)
-        self.transition1_weight_t = None  # cache transposed weight
+        self.transition1_weight_t = None  # cache transposed weight (cpp/torch/triton)
+        self.transition1_weight_packed = None  # cache convert_weight_packed'd weight (sgl)
 
         self.adaptive_zero_init = AdaLNZero(
             self.num_intermediate_factor * self.c_x,
@@ -124,12 +125,32 @@ class DiffusionTransition(nn.Module):
             self.use_single_cond
         )
 
+    def pack_weight(self) -> None:
+        if fastnn_config.gated_linear_unit_implementation != "sgl":
+            return
+        if self.transition1_weight_packed is None:
+            import sgl_kernel  # noqa: F401
+            self.transition1_weight_packed = torch.nn.Parameter(
+                torch.ops.sgl_kernel.convert_weight_packed(self.transition1.weight.data),
+                requires_grad=False,
+            )
+
+    def _glu_weight(self) -> torch.Tensor:
+        if fastnn_config.gated_linear_unit_implementation == "sgl":
+            assert self.transition1_weight_packed is not None, (
+                "sgl gated_linear_unit requires pre-packed weights; call "
+                "pack_sgl_weights(model) after loading weights (it invokes "
+                "DiffusionTransition.pack_weight)."
+            )
+            return self.transition1_weight_packed
+        if self.transition1_weight_t is None:
+            self.transition1_weight_t = self.transition1.weight.T.contiguous()
+        return self.transition1_weight_t
+
     @profile("DiffusionTransition")
     def forward(self, x: torch.Tensor, single_cond: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.adaptive_layernorm(x, single_cond)
-        if self.transition1_weight_t is None:
-            self.transition1_weight_t = self.transition1.weight.T.contiguous()
-        c = fastnn.gated_linear_unit(x, self.transition1_weight_t)
+        c = fastnn.gated_linear_unit(x, self._glu_weight())
         return self.adaptive_zero_init(c, single_cond)
 
 
