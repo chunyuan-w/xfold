@@ -20,8 +20,10 @@ grid_self_attention_implementation = os.environ.get(
 	"AF3_GRID_SELF_ATTENTION_IMPL", "cpp"
 )
 
-# options: ["torch", ""cpp"]
-self_attention_implementation = "cpp"
+# options: ["torch", "cpp", "sgl"]
+self_attention_implementation = os.environ.get(
+	"AF3_SELF_ATTENTION_IMPL", "cpp"
+)
 
 # options: ["torch", "cpp", "sgl"]
 triangle_multiplication_implementation = os.environ.get(

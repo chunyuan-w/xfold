@@ -309,8 +309,113 @@ class SelfAttentionCpp(nn.Module):
         return self.adaptive_zero_init(weighted_avg, single_cond)
 
 
+class SelfAttentionSGL(nn.Module):
+    """Single-token self-attention assembled entirely from existing SGL kernels
+    (no new C++ op): q/k/v + gating projections via weight_packed_linear, the
+    softmax(qkᵀ/√d + bias)·v core via dot_product_attention_sgl (flash_attn), and
+    the output gating via weight_packed_linear_sigmoid_mul. AdaptiveLayerNorm /
+    AdaLNZero stay torch (conditioning, not TPP kernels).
+
+    Like the grid SGL backend, the attention core ignores `mask`, so this is only
+    correct when the mask is all-ones (pad_to_buckets=False); guarded below.
+    """
+
+    def __init__(
+        self,
+        c_x: int = 768,
+        c_single_cond: int = 384,
+        num_head: int = 16,
+        use_single_cond: bool = False,
+        is_decoder: bool = True,
+    ) -> None:
+        super(SelfAttentionSGL, self).__init__()
+
+        self.c_x = c_x
+        self.c_single_cond = c_single_cond
+        self.num_head = num_head
+        self.is_decoder = is_decoder
+        self.qkv_dim = self.c_x // self.num_head
+        self.use_single_cond = use_single_cond
+
+        self.adaptive_layernorm = AdaptiveLayerNorm(self.c_x, self.c_single_cond, self.use_single_cond)
+
+        self.q_projection = nn.Linear(self.c_x, self.c_x, bias=True)
+        self.k_projection = nn.Linear(self.c_x, self.c_x, bias=False)
+        self.v_projection = nn.Linear(self.c_x, self.c_x, bias=False)
+        self.gating_query = nn.Linear(self.c_x, self.c_x, bias=False)
+
+        self.adaptive_zero_init = AdaLNZero(self.c_x, self.c_x, self.c_single_cond, self.use_single_cond)
+
+        # Packed weights, populated by pack_weight() via pack_sgl_weights().
+        self._q_packed = None
+        self._k_packed = None
+        self._v_packed = None
+        self._g_packed = None
+        self._q_bias = None
+
+    def pack_weight(self) -> None:
+        """Pre-pack q/k/v/gating weights (called by pack_sgl_weights, like
+        LinearSGL). Idempotent; forward assumes these are set."""
+        if self._q_packed is not None:
+            return
+        import sgl_kernel  # noqa: F401
+        cwp = torch.ops.sgl_kernel.convert_weight_packed
+        self._q_packed = torch.nn.Parameter(cwp(self.q_projection.weight.data), requires_grad=False)
+        self._k_packed = torch.nn.Parameter(cwp(self.k_projection.weight.data), requires_grad=False)
+        self._v_packed = torch.nn.Parameter(cwp(self.v_projection.weight.data), requires_grad=False)
+        self._g_packed = torch.nn.Parameter(cwp(self.gating_query.weight.data), requires_grad=False)
+        self._q_bias = torch.nn.Parameter(self.q_projection.bias.data.float(), requires_grad=False)
+
+    @profile("SelfAttention")
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        pair_logits: Optional[torch.Tensor] = None,
+        single_cond: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from xfold.nn.attention import dot_product_attention_sgl
+
+        assert (single_cond is None) == (self.use_single_cond is False)
+        assert self._q_packed is not None, (
+            "sgl self_attention requires pre-packed weights; call "
+            "pack_sgl_weights(model) after loading weights (it invokes pack_weight)."
+        )
+        # The attention core ignores `mask`, valid only when it is all-ones.
+        assert not fastnn_config.pad_to_buckets, (
+            "self_attention_implementation='sgl' ignores the attention mask and "
+            "assumes it is all-ones; run with --pad_to_buckets=False or use 'cpp'."
+        )
+
+        x = self.adaptive_layernorm(x, single_cond)  # [n, c_x]
+
+        q = torch.ops.sgl_kernel.weight_packed_linear(x, self._q_packed, self._q_bias, True)
+        k = torch.ops.sgl_kernel.weight_packed_linear(x, self._k_packed, None, True)
+        v = torch.ops.sgl_kernel.weight_packed_linear(x, self._v_packed, None, True)
+
+        q, k, v = map(
+            lambda t: einops.rearrange(t, 'n (h c) -> h n c', h=self.num_head).unsqueeze(0),
+            [q, k, v],
+        )
+
+        if pair_logits is None:
+            pair_logits = torch.zeros(
+                self.num_head, x.shape[0], x.shape[0], device=x.device, dtype=x.dtype)
+
+        weighted_avg = dot_product_attention_sgl(q, k, v, mask=mask, bias=pair_logits)
+        weighted_avg = einops.rearrange(weighted_avg.squeeze(0), 'h q c -> q (h c)').contiguous()
+
+        # gating: weighted_avg *= sigmoid(gating_query(x))
+        weighted_avg = torch.ops.sgl_kernel.weight_packed_linear_sigmoid_mul(
+            x, self._g_packed, None, weighted_avg, True, True)
+
+        return self.adaptive_zero_init(weighted_avg, single_cond)
+
+
 if fastnn_config.self_attention_implementation == "cpp":
     SelfAttention = SelfAttentionCpp
+elif fastnn_config.self_attention_implementation == "sgl":
+    SelfAttention = SelfAttentionSGL
 else:
     SelfAttention = SelfAttentionTorch
 
