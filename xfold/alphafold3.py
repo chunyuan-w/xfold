@@ -31,6 +31,18 @@ from tqdm import tqdm, trange
 from loguru import logger
 
 
+def _dbg_dump(name: str, t: torch.Tensor) -> None:
+    """Divergence-localization hook. When AF3_DUMP_DIR is set, save tensor `t`
+    (as fp32 cpu) to <AF3_DUMP_DIR>/<name>.pt so two otherwise-identical runs
+    (e.g. all-torch vs sgl gsa/tm, same seed/flags) can be diffed checkpoint by
+    checkpoint with compare_dumps.py. Inert unless AF3_DUMP_DIR is set."""
+    d = os.environ.get("AF3_DUMP_DIR", "")
+    if not d:
+        return
+    os.makedirs(d, exist_ok=True)
+    torch.save(t.detach().float().cpu().contiguous(), os.path.join(d, f"{name}.pt"))
+
+
 class Evoformer(nn.Module):
     def __init__(self, msa_channel: int = 64):
         super(Evoformer, self).__init__()
@@ -493,6 +505,8 @@ class AlphaFold3(nn.Module):
                         positions[sample_id].numel() * positions[sample_id].itemsize * (ws - 1),
                     )
         else:
+            # Divergence localization: baseline (scaled initial noise) for sample 0.
+            _dbg_dump("diff_step-001_pos", positions[0])
             for sample_idx in range(num_samples):
                 for step_idx in trange(self.diffusion_steps, desc=f"Diffusion {sample_idx}"):
                     positions[sample_idx] = self._apply_denoising_step(
@@ -503,6 +517,9 @@ class AlphaFold3(nn.Module):
                         mask,
                         noise_levels[1 + step_idx],
                     )
+                    # Dump sample 0's trajectory per step to find the bifurcation step.
+                    if sample_idx == 0:
+                        _dbg_dump(f"diff_step{step_idx:03d}_pos", positions[0])
 
         final_dense_atom_mask = torch.tile(mask[None], (num_samples, 1, 1))
 
@@ -536,6 +553,9 @@ class AlphaFold3(nn.Module):
                 target_feat=target_feat,
                 idx=i,
             )
+            # Divergence localization: dump the trunk conditioning after each recycle.
+            _dbg_dump(f"recycle{i:02d}_pair", embeddings['pair'])
+            _dbg_dump(f"recycle{i:02d}_single", embeddings['single'])
             print_comm_time()
 
         t2 = time.time()
