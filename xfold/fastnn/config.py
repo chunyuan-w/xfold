@@ -8,7 +8,9 @@ from af3_kernels.tools import USE_DIST
 layer_norm_implementation = "torch"
 
 # options: ["torch", "triton", "cpp"]
-dot_product_attention_implementation = "cpp"
+dot_product_attention_implementation = os.environ.get(
+	"AF3_DOT_PRODUCT_ATTENTION_IMPL", "cpp"
+)
 
 # options: ["torch", "triton", "cpp", "sgl"]
 gated_linear_unit_implementation = os.environ.get(
