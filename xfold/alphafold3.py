@@ -416,6 +416,19 @@ class AlphaFold3(nn.Module):
             (num_samples,) + mask.shape + (3,), device=device, dtype=torch.bfloat16)
         positions *= noise_levels[0]
 
+        # AF3_DEBUG_NOISE=1 prints a checksum of the initial diffusion noise so
+        # two runs (e.g. torch reference vs sgl kernels) can confirm they drew
+        # identical noise. Identical shape/sum/head => same seed AND same RNG
+        # consumption (requires matching --pad_to_buckets and --num_diffusion_samples);
+        # any remaining structural RMSD is then bf16 kernel amplification, not sampling.
+        if os.environ.get("AF3_DEBUG_NOISE", "0").lower() not in ("", "0", "false"):
+            print(
+                f"[diff-noise] shape={tuple(positions.shape)} "
+                f"sum={positions.float().sum().item():.6f} "
+                f"head={positions.flatten()[:4].float().tolist()}",
+                flush=True,
+            )
+
         assert self.diffusion_steps == 200
         assert num_samples == 5
 
