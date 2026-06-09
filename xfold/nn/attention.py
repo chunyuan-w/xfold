@@ -37,16 +37,36 @@ def pack_sgl_weights(module: nn.Module):
     Args:
         module: The model or submodule to pack weights for.
     """
-    # First pass: concat unpacked weights into fused weights (e.g. qkvg_weight).
-    for submodule in module.modules():
-        if hasattr(submodule, 'concat_qkvg_weights') and callable(submodule.concat_qkvg_weights):
-            submodule.concat_qkvg_weights()
-        if hasattr(submodule, 'concat_proj_gate_weights') and callable(submodule.concat_proj_gate_weights):
-            submodule.concat_proj_gate_weights()
-    # Second pass: pack all LinearSGL weights (including the newly created fused ones).
-    for submodule in module.modules():
-        if hasattr(submodule, 'pack_weight') and callable(submodule.pack_weight):
-            submodule.pack_weight()
+    # Packing builds throwaway nn.Linear modules in the concat passes below
+    # (concat_proj_gate_weights / concat_qkvg_weights); their default kaiming init
+    # draws from the global torch RNG. pack_sgl_weights() runs AFTER the per-seed
+    # torch.manual_seed() in ModelRunner.run_inference(), so without this guard an SGL
+    # run advances the global RNG more than a non-SGL run (e.g. the torch reference)
+    # and desyncs every later draw -- specifically:
+    #   - xfold.nn.featurization.shuffle_msa() -> gumbel_argsort_sample_idx() ->
+    #     gumbel_noise() -> torch.rand(): the per-recycle MSA subsampling, run
+    #     num_recycles times inside Evoformer.forward (alphafold3.py).
+    #   - AlphaFold3._sample_diffusion() (alphafold3.py): the initial noise
+    #     `positions = torch.randn((num_samples,) + mask.shape + (3,))`, plus the
+    #     per-step torch.randn() in _sample_step()/random_augmentation().
+    # Net effect without the guard: identically-seeded SGL vs reference runs pick
+    # different MSA rows and different diffusion noise, masking
+    # the bf16 kernel numerics we actually want to measure. Save/restore the RNG state
+    # so packing is RNG-neutral and those draws stay bit-identical across runs.
+    _rng_state = torch.get_rng_state()
+    try:
+        # First pass: concat unpacked weights into fused weights (e.g. qkvg_weight).
+        for submodule in module.modules():
+            if hasattr(submodule, 'concat_qkvg_weights') and callable(submodule.concat_qkvg_weights):
+                submodule.concat_qkvg_weights()
+            if hasattr(submodule, 'concat_proj_gate_weights') and callable(submodule.concat_proj_gate_weights):
+                submodule.concat_proj_gate_weights()
+        # Second pass: pack all LinearSGL weights (including the newly created fused ones).
+        for submodule in module.modules():
+            if hasattr(submodule, 'pack_weight') and callable(submodule.pack_weight):
+                submodule.pack_weight()
+    finally:
+        torch.set_rng_state(_rng_state)
 
 
 def dot_product_attention_sgl(q: torch.Tensor,
