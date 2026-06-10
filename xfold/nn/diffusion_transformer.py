@@ -484,11 +484,24 @@ class DiffusionTransformer(nn.Module):
             self.first_run = False
             pair_act = self.pair_input_layer_norm(pair_cond)
 
+            # einops rearrange returns a *permuted* (non-contiguous) view, and
+            # .clone() preserves those strides. Only the SGL self-attention
+            # backend feeds this bias to flash_attn (dot_product_attention_sgl),
+            # which needs a contiguous [num_head, N, N] and so called
+            # bias.contiguous() EVERY block -- a ~69 ms strided 242 MB
+            # transpose-copy at N=2752, x24 blocks x ~1000 diffusion steps.
+            # Materialize the contiguous layout once here (same one-time copy
+            # clone already paid) so that per-call .contiguous() is a no-op.
+            # The cpp/torch backends consume the bias once (pad_and_align_tensor
+            # / fastnn.dot_product_attention) and are layout-insensitive, so they
+            # keep the original .clone().
+            use_sgl = isinstance(self.self_attention[0], SelfAttentionSGL)
             for super_block_i in range(self.num_super_blocks):
                 pair_logits = self.pair_logits_projection[super_block_i](pair_act)
                 pair_logits = einops.rearrange(
                     pair_logits, 'n s (b h) -> b h n s', h=self.num_head)
-                self.pair_logits_list.append(pair_logits.clone())  # TODO(accuracy): find out whether this is necessary
+                self.pair_logits_list.append(
+                    pair_logits.contiguous() if use_sgl else pair_logits.clone())
 
         for super_block_i in range(self.num_super_blocks):
             for j in range(self.super_block_size):
