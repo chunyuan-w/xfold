@@ -32,14 +32,25 @@ class Transition(nn.Module):
         self.transition1_weight_packed = None  # cache convert_weight_packed'd weight (sgl)
         self.transition2 = nn.Linear(
             self.num_intermediate_factor * c_x, c_x, bias=False)
+        # cache packed transition2 weight for the fused sgl Transition kernel
+        self.transition2_weight_packed = None
 
     def pack_weight(self) -> None:
         if fastnn_config.gated_linear_unit_implementation != "sgl":
             return
+        import sgl_kernel  # noqa: F401
         if self.transition1_weight_packed is None:
-            import sgl_kernel  # noqa: F401
             self.transition1_weight_packed = torch.nn.Parameter(
                 torch.ops.sgl_kernel.convert_weight_packed(self.transition1.weight.data),
+                requires_grad=False,
+            )
+        # The fused transition1+transition2 kernel needs both weights packed and
+        # requires the transition2 output channels (c_in) to tile by 32.  When
+        # c_in % 32 != 0 we leave transition2_weight_packed = None and fall back
+        # to the two-step path in forward().
+        if self.transition2_weight_packed is None and self.c_in % 32 == 0:
+            self.transition2_weight_packed = torch.nn.Parameter(
+                torch.ops.sgl_kernel.convert_weight_packed(self.transition2.weight.data),
                 requires_grad=False,
             )
 
@@ -58,6 +69,19 @@ class Transition(nn.Module):
     @profile("Transition")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.input_layer_norm(x)
+        # Fused transition1(GLU)+transition2: avoids materializing the wide
+        # [M, 4*c_x] gated intermediate (the dominant cost at pair-rep scale,
+        # M = N_tok²).  sgl-only and only when transition2 was packed.
+        if (
+            fastnn_config.gated_linear_unit_implementation == "sgl"
+            and self.transition2_weight_packed is not None
+            and not torch.is_grad_enabled()
+        ):
+            import sgl_kernel  # noqa: F401
+            x2d = x.reshape(-1, x.shape[-1])
+            out = torch.ops.sgl_kernel.fused_transition(
+                x2d, self.transition1_weight_packed, self.transition2_weight_packed, True)
+            return out.view(*x.shape[:-1], out.shape[-1])
         c = fastnn.gated_linear_unit(x, self._glu_weight())
         return self.transition2(c)
 
