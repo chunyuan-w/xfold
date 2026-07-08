@@ -296,8 +296,8 @@ class GridSelfAttentionSGL(nn.Module):
         return pair
 
 
-class GridSelfAttentionFusedSGLv2(nn.Module):
-    """A+B split: one QKVG concat GEMM + fused attention-tail + out_proj."""
+class GridSelfAttentionFusedSGL(nn.Module):
+    """One QKVG concat GEMM + fused attention-tail + out_proj (sgl-kernel fused_grid_attention)."""
 
     def __init__(self, c_pair: int = 128, num_head: int = 4, transpose: bool = False):
         super().__init__()
@@ -345,12 +345,12 @@ class GridSelfAttentionFusedSGLv2(nn.Module):
 
     @profile("GridSelfAttention")
     def forward(self, pair, mask):
-        # fused_grid_attention_v2 has no mask input, so this backend silently
+        # fused_grid_attention has no mask input, so this backend silently
         # ignores `mask`. That is only correct when the mask is all-ones, i.e.
         # features are not bucket-padded. Guard the assumption rather than
         # produce wrong results on padded inputs.
         assert not fastnn_config.pad_to_buckets, (
-            "grid_self_attention_implementation='sgl' (GridSelfAttentionFusedSGLv2) "
+            "grid_self_attention_implementation='sgl' (GridSelfAttentionFusedSGL) "
             "ignores the attention mask and assumes it is all-ones, which only holds "
             "without bucket padding. Run with --pad_to_buckets=False, or use the "
             "'cpp' grid self attention backend."
@@ -360,7 +360,7 @@ class GridSelfAttentionFusedSGLv2(nn.Module):
         if self.transpose:
             pair = pair.permute(1, 0, 2).contiguous()
 
-        out = torch.ops.sgl_kernel.fused_grid_attention_v2(
+        out = torch.ops.sgl_kernel.fused_grid_attention(
             pair,
             bias,
             self.qkvg_projection.weight,
@@ -380,7 +380,7 @@ if fastnn_config.grid_self_attention_implementation == "cpp":
     else:
         GridSelfAttention = GridSelfAttentionCpp
 elif fastnn_config.grid_self_attention_implementation == "sgl":
-    GridSelfAttention = GridSelfAttentionFusedSGLv2
+    GridSelfAttention = GridSelfAttentionFusedSGL
 else:
     GridSelfAttention = GridSelfAttentionTorch
 

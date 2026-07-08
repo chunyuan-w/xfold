@@ -47,28 +47,8 @@ def register_fake_ops():
         return x.new_empty(out_shape)
 
     @torch.library.register_fake("sgl_kernel::fused_grid_attention")
-    def _(pair, bias, q_w, k_w, v_w, g_w, o_w, num_heads, is_vnni):
+    def _(pair, bias, qkvg_w, o_w, num_heads, is_vnni):
         # Output preserves pair's shape, with last dim = output_weight's logical out-dim.
-        out_shape = pair.shape[:-1] + (o_w.shape[1],)
-        return pair.new_empty(out_shape)
-
-    @torch.library.register_fake("sgl_kernel::fused_grid_attention_v2")
-    def _(pair, bias, qkvg_w, o_w, num_heads, is_vnni):
-        out_shape = pair.shape[:-1] + (o_w.shape[1],)
-        return pair.new_empty(out_shape)
-
-    @torch.library.register_fake("sgl_kernel::fused_grid_attention_v3")
-    def _(pair, bias, q_w, k_w, v_w, g_w, o_w, num_heads, is_vnni):
-        out_shape = pair.shape[:-1] + (o_w.shape[1],)
-        return pair.new_empty(out_shape)
-
-    @torch.library.register_fake("sgl_kernel::fused_grid_attention_v4")
-    def _(pair, bias, qkvg_w, o_w, num_heads, is_vnni):
-        out_shape = pair.shape[:-1] + (o_w.shape[1],)
-        return pair.new_empty(out_shape)
-
-    @torch.library.register_fake("sgl_kernel::fused_grid_attention_v5")
-    def _(pair, bias, qkvg_w, o_w, num_heads, is_vnni):
         out_shape = pair.shape[:-1] + (o_w.shape[1],)
         return pair.new_empty(out_shape)
 
@@ -530,59 +510,7 @@ class GridSelfAttentionSGL(nn.Module):
 
 
 class GridSelfAttentionFusedSGL(nn.Module):
-    """Calls the single fused CPU kernel (QKV + flash attn + gate + output proj)."""
-
-    def __init__(self, m):
-        super().__init__()
-        self.c_pair = m.c_pair
-        self.num_head = m.num_head
-        self.qkv_dim = self.c_pair // self.num_head
-        self.transpose = m.transpose
-
-        self.act_norm = copy.deepcopy(m.act_norm)
-        self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
-
-        import sgl_kernel  # ensure the op library is loaded
-
-        def pack(weight: torch.Tensor) -> torch.nn.Parameter:
-            return torch.nn.Parameter(
-                torch.ops.sgl_kernel.convert_weight_packed(weight.data),
-                requires_grad=False,
-            )
-
-        self.q_weight = pack(m.q_projection.weight)
-        self.k_weight = pack(m.k_projection.weight)
-        self.v_weight = pack(m.v_projection.weight)
-        self.gating_weight = pack(m.gating_query.weight)
-        self.output_weight = pack(m.output_projection.weight)
-
-    def forward(self, pair, mask, small_ops=False, torch_sdpa=False):
-        pair = self.act_norm(pair)
-        bias = self.pair_bias_projection(pair).permute(2, 0, 1).contiguous()
-        if self.transpose:
-            pair = pair.permute(1, 0, 2).contiguous()
-
-        # Treat the leading [N, N, C] as [B=N, N, C] so the fused op's [B, N, D]
-        # contract matches our grid-self-attention input.
-        out = torch.ops.sgl_kernel.fused_grid_attention(
-            pair,
-            bias,
-            self.q_weight,
-            self.k_weight,
-            self.v_weight,
-            self.gating_weight,
-            self.output_weight,
-            self.num_head,
-            True,  # is_vnni
-        )
-
-        if self.transpose:
-            out = out.permute(1, 0, 2)
-        return out
-
-
-class GridSelfAttentionFusedSGLv2(nn.Module):
-    """A+B split: one QKVG concat GEMM + fused attention-tail + out_proj."""
+    """One QKVG concat GEMM + fused attention-tail + out_proj (sgl-kernel fused_grid_attention)."""
 
     def __init__(self, m):
         super().__init__()
@@ -622,7 +550,7 @@ class GridSelfAttentionFusedSGLv2(nn.Module):
         if self.transpose:
             pair = pair.permute(1, 0, 2).contiguous()
 
-        out = torch.ops.sgl_kernel.fused_grid_attention_v2(
+        out = torch.ops.sgl_kernel.fused_grid_attention(
             pair,
             bias,
             self.qkvg_weight,
@@ -636,163 +564,7 @@ class GridSelfAttentionFusedSGLv2(nn.Module):
         return out
 
 
-class GridSelfAttentionFusedSGLv3(nn.Module):
-    """v1 layout (per-head tiled projections) + v2 attention core (full logits)."""
-
-    def __init__(self, m):
-        super().__init__()
-        self.c_pair = m.c_pair
-        self.num_head = m.num_head
-        self.qkv_dim = self.c_pair // self.num_head
-        self.transpose = m.transpose
-
-        self.act_norm = copy.deepcopy(m.act_norm)
-        self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
-
-        import sgl_kernel  # ensure the op library is loaded
-
-        def pack(weight: torch.Tensor) -> torch.nn.Parameter:
-            return torch.nn.Parameter(
-                torch.ops.sgl_kernel.convert_weight_packed(weight.data),
-                requires_grad=False,
-            )
-
-        self.q_weight = pack(m.q_projection.weight)
-        self.k_weight = pack(m.k_projection.weight)
-        self.v_weight = pack(m.v_projection.weight)
-        self.gating_weight = pack(m.gating_query.weight)
-        self.output_weight = pack(m.output_projection.weight)
-
-    def forward(self, pair, mask, small_ops=False, torch_sdpa=False):
-        pair = self.act_norm(pair)
-        bias = self.pair_bias_projection(pair).permute(2, 0, 1).contiguous()
-        if self.transpose:
-            pair = pair.permute(1, 0, 2).contiguous()
-
-        out = torch.ops.sgl_kernel.fused_grid_attention_v3(
-            pair,
-            bias,
-            self.q_weight,
-            self.k_weight,
-            self.v_weight,
-            self.gating_weight,
-            self.output_weight,
-            self.num_head,
-            True,  # is_vnni
-        )
-
-        if self.transpose:
-            out = out.permute(1, 0, 2)
-        return out
-
-
-class GridSelfAttentionFusedSGLv4(nn.Module):
-    """B-tiled v2: same concat-QKVG GEMM but materialized in an L3-sized chunk."""
-
-    def __init__(self, m):
-        super().__init__()
-        self.c_pair = m.c_pair
-        self.num_head = m.num_head
-        self.qkv_dim = self.c_pair // self.num_head
-        self.transpose = m.transpose
-
-        self.act_norm = copy.deepcopy(m.act_norm)
-        self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
-
-        import sgl_kernel  # ensure the op library is loaded
-
-        qkvg_weight_unpacked = torch.cat(
-            [
-                m.q_projection.weight.data,
-                m.k_projection.weight.data,
-                m.v_projection.weight.data,
-                m.gating_query.weight.data,
-            ],
-            dim=0,
-        )
-        self.qkvg_weight = torch.nn.Parameter(
-            torch.ops.sgl_kernel.convert_weight_packed(qkvg_weight_unpacked),
-            requires_grad=False,
-        )
-        self.output_weight = torch.nn.Parameter(
-            torch.ops.sgl_kernel.convert_weight_packed(m.output_projection.weight.data),
-            requires_grad=False,
-        )
-
-    def forward(self, pair, mask, small_ops=False, torch_sdpa=False):
-        pair = self.act_norm(pair)
-        bias = self.pair_bias_projection(pair).permute(2, 0, 1).contiguous()
-        if self.transpose:
-            pair = pair.permute(1, 0, 2).contiguous()
-
-        out = torch.ops.sgl_kernel.fused_grid_attention_v4(
-            pair,
-            bias,
-            self.qkvg_weight,
-            self.output_weight,
-            self.num_head,
-            True,  # is_vnni
-        )
-
-        if self.transpose:
-            out = out.permute(1, 0, 2)
-        return out
-
-
-class GridSelfAttentionFusedSGLv5(nn.Module):
-    """Per-b parallelism with per-thread qkvg_row scratch (no 22 GB intermediate)."""
-
-    def __init__(self, m):
-        super().__init__()
-        self.c_pair = m.c_pair
-        self.num_head = m.num_head
-        self.qkv_dim = self.c_pair // self.num_head
-        self.transpose = m.transpose
-
-        self.act_norm = copy.deepcopy(m.act_norm)
-        self.pair_bias_projection = LinearSGL(m.pair_bias_projection)
-
-        import sgl_kernel  # ensure the op library is loaded
-
-        qkvg_weight_unpacked = torch.cat(
-            [
-                m.q_projection.weight.data,
-                m.k_projection.weight.data,
-                m.v_projection.weight.data,
-                m.gating_query.weight.data,
-            ],
-            dim=0,
-        )
-        self.qkvg_weight = torch.nn.Parameter(
-            torch.ops.sgl_kernel.convert_weight_packed(qkvg_weight_unpacked),
-            requires_grad=False,
-        )
-        self.output_weight = torch.nn.Parameter(
-            torch.ops.sgl_kernel.convert_weight_packed(m.output_projection.weight.data),
-            requires_grad=False,
-        )
-
-    def forward(self, pair, mask, small_ops=False, torch_sdpa=False):
-        pair = self.act_norm(pair)
-        bias = self.pair_bias_projection(pair).permute(2, 0, 1).contiguous()
-        if self.transpose:
-            pair = pair.permute(1, 0, 2).contiguous()
-
-        out = torch.ops.sgl_kernel.fused_grid_attention_v5(
-            pair,
-            bias,
-            self.qkvg_weight,
-            self.output_weight,
-            self.num_head,
-            True,  # is_vnni
-        )
-
-        if self.transpose:
-            out = out.permute(1, 0, 2)
-        return out
-
-
-def main(use_torch, torch_compile, use_fused, use_fused2, use_fused3, use_fused4, use_fused5):
+def main(use_torch, torch_compile, use_fused):
     c_pair = 128
     num_head = 4
 
@@ -812,15 +584,7 @@ def main(use_torch, torch_compile, use_fused, use_fused2, use_fused3, use_fused4
             m_ref.act_norm.weight.copy_(1.0 + 0.1 * torch.randn_like(m_ref.act_norm.weight))
             m_ref.act_norm.bias.copy_(0.2 + 0.1 * torch.randn_like(m_ref.act_norm.bias))
 
-        if use_fused5:
-            m = GridSelfAttentionFusedSGLv5(m_ref)
-        elif use_fused4:
-            m = GridSelfAttentionFusedSGLv4(m_ref)
-        elif use_fused3:
-            m = GridSelfAttentionFusedSGLv3(m_ref)
-        elif use_fused2:
-            m = GridSelfAttentionFusedSGLv2(m_ref)
-        elif use_fused:
+        if use_fused:
             m = GridSelfAttentionFusedSGL(m_ref)
         else:
             m = GridSelfAttentionSGL(m_ref)
@@ -941,15 +705,7 @@ if __name__ == "__main__":
     parser.add_argument('--torch', action='store_true')
     parser.add_argument('--torch-compile', action='store_true')
     parser.add_argument('--fused', action='store_true',
-                        help='use the single fused CPU kernel (QKV + flash attn + gate + output proj)')
-    parser.add_argument('--fused2', action='store_true',
-                        help='A+B split: concat QKVG GEMM + fused attn-tail + out_proj')
-    parser.add_argument('--fused3', action='store_true',
-                        help='v1 per-head tiled projections + v2 full-logit attn core (no 22 GB qkvg)')
-    parser.add_argument('--fused4', action='store_true',
-                        help='v2 with B-tiled qkvg scratch (L3-sized), no 22 GB materialized')
-    parser.add_argument('--fused5', action='store_true',
-                        help='v5: per-b parallelism with per-thread qkvg_row scratch (no 22 GB materialized)')
+                        help='use the fused CPU kernel: concat QKVG GEMM + fused attn-tail + out_proj')
     args = parser.parse_args()
 
-    main(args.torch, args.torch_compile, args.fused, args.fused2, args.fused3, args.fused4, args.fused5)
+    main(args.torch, args.torch_compile, args.fused)
